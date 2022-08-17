@@ -1,0 +1,483 @@
+---
+title: "eagle algorithm"
+output: html_notebook
+---
+
+## Eagle Algorithm Simple Version
+
+Suppose that there is no repeated observation (Z = I), no missing value in genotype data.\
+And the phenotype data is of single dimension.
+
+The name of functions follow such style : do.something(), do.some.vector(), do.some.Matrix()\
+The name of variables follow such style : some_data, some_vector, Some_Matrix
+
+```{r}
+require('MM4LMM')
+require("glmnet")
+require("testthat")
+
+do_test <- TRUE
+use_data1 <- TRUE
+use_data2 <- FALSE
+```
+
+#### Load data if do test
+
+```{r}
+if (do_test) {
+  if (use_data1){
+    data(QTLDetectionExample)
+    Geno <- QTLDetectionExample$Genotype
+    Pheo <- QTLDetectionExample$Phenotype
+    Kinship <- QTLDetectionExample$Kinship
+    message("Example data loaded.")
+  } else if (use_data2) {
+    DIR <- "https://raw.githubusercontent.com/geo047/Example_Data/master/"
+    if (!file.exists("mapex.dat")) download.file(paste0(DIR, "mapex.dat"))
+    if (!file.exists("phenoex.dat")) download.file(paste0(DIR, "phenoex.dat"))
+    if (!file.exists("genoex.dat.zip")) download.file(paste0(DIR, "genoex.dat.zip"))
+    if (!file.exists("genoex.dat")) unzip("genoex.dat.zip")
+  }
+}
+```
+
+#### Syntactic Sugar
+
+```{r}
+# inverse of a matrix M
+inv <- function(M) chol2inv(chol(M))
+# faster multiple cross product of a list of matrix Mlist
+mcp <- function(...) Reduce(function(u,v) crossprod(t(u),v), list(...))
+# absolute value of the self-adjoint operator of a random normal distribution matrix plus a diagonal matrix
+arndm <- function(nrow) abs(crossprod(matrix(data = rnorm(nrow^2), nrow = nrow))) + diag(nrow = nrow)
+```
+
+```{r}
+if (do_test) {
+  nrow = 9
+  M1 <- arndm(nrow)
+  M2 <- arndm(nrow)
+  M3 <- arndm(nrow)
+  M4 <- arndm(nrow)
+  
+  res1 <- M1 %*% M2 %*% M3 %*% M4
+  res2 <- mcp(M1,M2,M3,M4)
+  
+  test_that("Test of Syntactic Sugar", {
+    expect_lt(max(abs(inv(M1) %*% M1 - diag(nrow = nrow))), 1e-10)
+    expect_lt(max(abs(M1 %*% inv(M1) - diag(nrow = nrow))), 1e-10)
+    expect_lt(max(abs(res1 - res2)), 1e-10)
+  })
+  
+  plot(res1, res2, main="compare the result of cross product of a list of matrix", 
+       xlab="cross product by %*%", ylab="cross product by mcp", col="blue")
+}
+```
+
+
+#### Build X matrix, X is the selected locus genotype data
+
+dimension of X : n x p\
+p = length(selected_locus)\
+n is the number of observations
+
+```{r}
+build.X <- function (geno, selected_locus = NULL) {
+
+  # dim of geno : n x p, n is the number of observation, p is the number of SNPs
+  X <- matrix(data = 1, nrow = nrow(geno), ncol = 1)
+  colnames(X) <- c("intercept")
+  
+  if (!is.null(selected_locus)) {
+    X <- cbind(X, geno[, selected_locus])
+  }
+  
+  return(as.matrix(X))
+}
+```
+
+#### test cases of the funtion build.X
+
+```{r}
+if (do_test) {
+
+  X <- build.X(geno = Geno)
+  
+  test_that("Testing build.X result dimension and value", {
+    expect_equal(dim(X), c(dim(Geno)[1],1))
+    expect_equal(dim(build.X(geno = Geno, 1)), c(dim(Geno)[1],2))
+    expect_equal(dim(build.X(geno = Geno, c(1,2))), c(dim(Geno)[1],3))
+    expect_equal(length(unique(X)), 1)
+    expect_equal(unique(X)[1], 1)
+  })
+  
+  X <- build.X(geno = Geno, c(1,2,3))
+  
+  message("[PASS] test cases of build.X\n")
+  
+  head(X)
+}
+```
+
+#### build M_s matrix, M_s is the unselected locus genotype data
+
+```{r}
+build.M_s <- function(geno, selected_locus = NULL) {
+
+  if (is.null(selected_locus)) {
+    return(geno)
+  }
+  
+  return(geno[, - selected_locus])
+}
+```
+
+#### Test case of the function build.M_s
+
+```{r}
+if (do_test) {
+  M_s0 <- build.M_s(geno = Geno, selected_locus = NULL)
+  M_s  <- build.M_s(geno = Geno, selected_locus = c(1,2,3))
+
+  test_that("Testing build.M_s result dimension and value", {
+    expect_equal(dim(M_s0), dim(Geno))
+    expect_equal(dim(M_s), c(dim(Geno)[1],dim(Geno)[2]-3))
+  })
+  
+  message("[PASS] test cases of build.M_s\n")
+  
+  head(M_s)
+}
+```
+
+#### build Kinship Matrix
+
+```{r}
+build.Kinship <- function(M_s) {
+  L <- ncol(M_s) 
+  # standarize M_s by columns
+  M_s <- scale(M_s)
+  MMt <- tcrossprod(M_s) / L
+  return(MMt)
+}
+```
+
+#### test cases of the funtion build.Kinship
+
+```{r}
+if (do_test) {
+  M_s  <- build.M_s(geno = Geno, selected_locus = c(1,2,3))
+  K <- build.Kinship(M_s = M_s)
+
+  test_that("Test build.Kinship result dimension", {
+    expect_equal(dim(K), c(dim(M_s)[1],dim(M_s)[1]))
+  })
+  
+  message("[PASS] test cases of build.Kinship\n")
+  
+  print(sprintf("dim(Kinship): %d x %d", dim(K)[1],dim(K)[2]))
+}
+```
+
+#### Calculate the parameters of Models $\hat{\mu}, \hat{\sigma_G}^2, \hat{\sigma_E}^2$
+
+```{r}
+calc.variances <- function (Y, X, Kinship, init = NULL, Method = "Reml") {
+  # X : fixed effect
+  
+  n <- length(Y)
+  
+  ## Build the VarList object
+  VL <- list(Additive = Kinship , Error = diag(1,n))
+  
+  ## Perform inference by MM4LMMm, todo : save the old sigma
+  res <- MMEst(Y = Y, Cofactor = X, VarList = VL, Init = init, Method = Method)
+  
+  v <- list(vg = res$NullModel$Sigma2["Additive"],
+            ve = res$NullModel$Sigma2["Error"],
+            Beta = res$NullModel$Beta)
+  
+  if (Method == "Reml") {
+    v$loglik <- res$NullModel$`LogLik (Reml)`
+    v$method <- Method
+  } else if (Method == "ML") {
+    v$loglik <- res$NullModel$`LogLik (ML)`
+    v$method <- Method
+  }
+  
+  return(v)
+}
+```
+
+#### Test case of the function calc.variances
+
+```{r}
+if (do_test) {
+  
+  s <- c(1,2)
+  X <- build.X(geno = Geno, selected_locus = s)
+  M_s <- build.M_s(geno = Geno, selected_locus = s)
+  K <- build.Kinship(M_s = M_s)
+  res <- calc.variances(Y = Pheo, X = X, Kinship = K, Method = "ML")
+  
+  test_that("Test calc.variances result", {
+    expect_length(res$Beta, length(s)+1)
+    expect_true(is.numeric(res$vg))
+    expect_true(is.numeric(res$ve))
+  })
+  
+  message("[PASS] test cases of calc.variances\n")
+  
+  print(res)
+}
+```
+
+#### Calculate $\hat{\beta}, var(\hat{\beta})$
+
+```{r}
+calc.beta <- function(Y, M_s, Kinship, mu, v) {
+  # M_s : genetic effect
+  calc.diag_var_beta1 <- function(D, V, lambda, vg, L) vg * diag(mcp(V, diag((D**2)/(D**2+lambda*L)), t(V))) / L
+  calc.diag_var_beta2 <- function(D, V, lambda, vg, L) vg*crossprod(t(V*V), (D**2)/(D**2+lambda*L))/L
+  
+  lambda <- v$ve / v$vg
+  X_s <- scale(M_s)
+  L <- length(colnames(X_s))
+  K_ <- Kinship + diag(x = lambda, nrow = nrow(Kinship))
+  inv_K_ <- inv(K_)
+  SVD <- svd(X_s)
+  beta <- mcp(t(X_s), inv_K_, (Y - mu)) / L
+  diag_var_beta1 <- calc.diag_var_beta1(D = SVD$d, V = SVD$v, lambda = lambda, vg = v$vg, L = L)
+  diag_var_beta2 <- calc.diag_var_beta2(D = SVD$d, V = SVD$v, lambda = lambda, vg = v$vg, L = L)
+  return(list(beta = beta, diag_var_beta1 = diag_var_beta1, diag_var_beta2 = diag_var_beta2))
+}
+```
+
+#### Test case of the function calc.beta
+
+```{r}
+if (do_test) {
+  s <- c(1,2)
+  X <- build.X(geno = Geno, selected_locus = s)
+  M_s <- build.M_s(geno = Geno, selected_locus = s)
+  K <- build.Kinship(M_s = M_s)
+  vars <- calc.variances(Y = Pheo, X = X, Kinship = K)
+  mu <- X %*% vars$Beta
+  beta_hat <- calc.beta(Y = Pheo, M_s = M_s, Kinship = K, mu = mu, v = vars)
+  
+  # compare diag_var_beta
+  X_s <- scale(M_s)
+  L <- length(colnames(X_s))
+  lambda <- vars$ve / vars$vg
+  K_ <- K + diag(lambda * L, nrow = nrow(K))
+  inv_K_ <- inv(K_)
+  diag_var_beta <- diag(vars$vg * mcp(t(X_s), inv_K_, X_s) / L)
+  
+  # compare beta
+  fit <- glmnet(x = M_s, y = Pheo - mu, alpha = 0, lambda = lambda)
+  
+  test_that("calc.beta result", {
+    expect_equal(length(beta_hat$beta), ncol(M_s))
+    expect_lt(max(abs(beta_hat$diag_var_beta1 - diag_var_beta)), 1e-13)
+    expect_lt(max(abs(beta_hat$diag_var_beta2 - diag_var_beta)), 1e-13)
+  })
+  
+  message("[PASS] test cases of calc.beta")
+  
+  plot(beta_hat$diag_var_beta1, diag_var_beta)
+  plot(beta_hat$diag_var_beta2, diag_var_beta)
+  plot(fit$beta, beta_hat$beta)
+  
+  print(beta_hat)
+}
+```
+
+#### find QTL - Quantitative trait locus
+
+```{r}
+
+calc.snps_scores <- function(beta, var_beta) beta/var_beta
+
+find.QTL <- function (scores, qtl_names) {
+  
+  max_idx <- which.max(scores)
+  max_name <- rownames(scores)[max_idx]
+  
+  return(list(score = scores[max_idx], 
+              name = max_name,
+              idx = which(qtl_names == max_name)))
+}
+
+```
+
+#### Test case of the function calc.snps_scores
+
+```{r}
+if (do_test) {
+  s <- c(1,2)
+  X <- build.X(geno = Geno, selected_locus = s)
+  M_s <- build.M_s(geno = Geno, selected_locus = s)
+  K <- build.Kinship(M_s = M_s)
+  vars <- calc.variances(Y = Pheo, X = X, Kinship = K)
+  mu <- tcrossprod(X, t(vars$Beta))
+  beta_hat <- calc.beta(Y = Pheo, M_s = M_s, Kinship = K, mu = mu, v = vars)
+  scores <- calc.snps_scores(beta = beta_hat$beta, var_beta = beta_hat$diag_var_beta1)
+  res <- find.QTL(scores = scores, colnames(Geno))
+  
+  test_that ("calc.snps_scores result", {
+    expect_equal(dim(scores), c(dim(M_s)[2],1))
+    expect_equal(res$name, colnames(Geno)[res$idx])
+  }) 
+  
+  message("[PASS] test cases of calc.beta")
+  
+  print(res)
+}
+```
+
+#### calculate the score of a new model
+
+```{r}
+calc.model_score <- function(loglik, nobs, l, s, gamma) {
+  # l : total number of snps
+  # s : number of selected locus
+  # loglik: Log Likelihood
+  # gamma: extended BIC parameter
+  
+  calc.BIC    <- function(nobs, loglik, l) -2 * loglik + l * log(nobs)
+  calc.extBIC <- function(bic, l, s, gamma) bic + 2 * gamma * lchoose(l, s)
+  
+  bic <- calc.BIC(nobs, loglik, l)
+  xbic <- calc.extBIC(bic, l, s, gamma)
+  
+  return(xbic)
+}
+```
+
+#### Test case of the function calc.model_score
+
+```{r}
+if (do_test) {
+  score <- calc.model_score(loglik = 10, nobs = 10, l = 100, s = 10, gamma = 0.6)
+  print(score)
+}
+```
+
+
+### Algorithm: EAGLE, cas: Z = I
+
+```{r}
+
+simpleEagle <- function (pheno_mat, geno_mat, gamma = 0.6, max_itr_num = 100, fixit = FALSE) {
+  
+  #### init loop 
+  total_SNPs_num <- ncol(geno_mat)
+  continue <- TRUE
+  itr_num <- 1
+  selected_locus <- c()
+  selected_locus_names <- c()
+  model_score_history <- c()
+  vars_param_history <- list()
+  beta_hat_param_history <- list()
+  
+  while (continue) {
+    
+    print(sprintf("Iteration: %d ", itr_num))
+    
+    #### #### #### ####    STEP 1 model building    #### #### #### ####
+    # mixed model: Y = X%*%tou + Z %*% Ug + e
+    X <- build.X(geno = geno_mat, selected_locus = selected_locus)
+    
+    #### build Kinship Matrix
+    M_s <- build.M_s(geno = geno_mat, selected_locus = selected_locus)
+    K <- build.Kinship(M_s)
+    
+    #### calculate expectation and variances by MM4LMM
+    vars <- calc.variances(Y = pheno_mat, X = X, Kinship = K)
+    beta_hat <- calc.beta(Y = pheno_mat, M_s = M_s, Kinship = K, 
+                          mu = tcrossprod(X,t(vars$Beta)), v = vars)
+    
+    #### #### #### ####    STEP 2 model evaluation   #### #### #### #### 
+    # calculate the score of the model 
+    model_score <- calc.model_score(loglik = vars$loglik, nobs = nrow(M_s), 
+                                    l = total_SNPs_num, s = length(selected_locus), 
+                                    gamma = gamma) 
+    
+    print(sprintf("score of the model: %f ", model_score))
+    
+    #### Termination Conditions: 
+    # 1. new score of model < last one 
+    # Question: Extend BIC is going up or down while the model is being promoted ? 
+    if (!fixit && !is.null(model_score_history)) {
+      if (model_score < max(model_score_history)) {
+        itr_num <- itr_num - 1
+        selected_locus <- selected_locus[-itr_num]
+        selected_locus_names <- selected_locus_names[-itr_num]
+        print("[Termination Message] The score of the new model cannot beat the previous one.")
+        break
+      }
+    }
+    
+    model_score_history <- c(model_score_history, model_score)
+    vars_param_history[[itr_num]] <- vars
+    beta_hat_param_history[[itr_num]] <- beta_hat$beta
+    
+    # 2. iteration number > maximum iteration number
+    if (itr_num > max_itr_num ) {
+      print("[Termination Message] The iteration number reach the max.")
+      break
+    }
+    
+    # 3. all SNPs are going to be selected
+    # To avoid pass abnormal values to MM4LMM
+    if (itr_num >= total_SNPs_num - 1) {
+      print("[Termination Message] Too many locus are selected, it seems wired. ")
+      break
+    }
+    
+    #### #### #### ####    STEP 3 model selection   #### #### #### #### 
+    scores <- calc.snps_scores(beta = beta_hat$beta, var_beta = beta_hat$diag_var_beta1)
+    new_selected_loci <- find.QTL(scores = scores, colnames(geno_mat))
+    selected_locus <- c(selected_locus, new_selected_loci$idx)
+    selected_locus_names <- c(selected_locus_names, new_selected_loci$name)
+    
+    print(sprintf("new selected loci: %s ", new_selected_loci$name))
+    
+    itr_num <- itr_num + 1
+  }
+  
+  return(list(SNPs_idx = selected_locus, 
+              SNPs_names = selected_locus_names, 
+              fixed_effect_param = vars$Beta,
+              var_additive = vars$vg,
+              var_error = vars$ve,
+              genetic_effect_param = beta_hat_param_history[[itr_num]],
+              model_score = model_score_history[[itr_num]], 
+              model_score_history = model_score_history))
+}
+```
+
+#### test case of the algorithm
+
+```{r}
+if (do_test) {
+  if (use_data1){
+    data(QTLDetectionExample)
+    Geno <- QTLDetectionExample$Genotype
+    Pheo <- QTLDetectionExample$Phenotype
+    res <- simpleEagle(pheno_mat = Pheo, geno_mat = Geno)
+    
+    test_that("EAGLE, Z = I", {
+      expect_equal(length(res$SNPs_idx), length(res$SNPs_names))
+      expect_equal(length(res$fixed_effect_param), length(res$model_score_history))
+      expect_equal(length(res$SNPs_idx) + 1, length(res$fixed_effect_param))
+    })
+    
+    message("[PASS] test cases of EAGLE")
+    
+    print(res)
+  } 
+}
+
+```
+

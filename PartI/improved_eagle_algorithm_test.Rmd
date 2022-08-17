@@ -1,0 +1,628 @@
+---
+title: "2.1 Improved Eagle Algorithm"
+output: html_notebook
+---
+
+```{r}
+library('MM4LMM')
+library("data.table")
+library("dplyr")
+library("Eagle")
+library("tictoc")
+
+source("improved_eagle_algorithm.R")
+```
+
+#### 2.1.2 Main Diagonal of the Variance Matrix: diag(AB) == rowSums(A*t(B))
+
+```{r}
+
+i = 5
+
+A = matrix(rnorm(2 * (10**i)), ncol = 10)
+B = matrix(rnorm(2 * (10**i)), nrow = 10)
+  
+x = diag(A %*% B)
+y = rowSums(A*t(B))
+
+plot(y, x, xlab = "diag(A %*% B)", ylab = "rowSums(A*t(B))")
+
+```
+
+#### 2.1.2 Main Diagonal of the Variance Matrix: compare the performance of diag(AB) and rowSums(A*t(B))
+
+```{r}
+
+t1 <- unlist(lapply(1:5, function(i){
+  A = matrix(rnorm(2 * (10**i)), ncol = 10)
+  B = matrix(rnorm(2 * (10**i)), nrow = 10)
+  
+  t1.start <- Sys.time()
+  diag(A %*% B)
+  t1.end   <- Sys.time()
+  
+  return(t1.end - t1.start)
+}))
+
+t2 <- unlist(lapply(1:7, function(i){
+  A = matrix(rnorm(2 * (10**i)), ncol = 10)
+  B = matrix(rnorm(2 * (10**i)), nrow = 10)
+  
+  t2.start <- Sys.time()
+  rowSums(A*t(B))
+  t2.end <- Sys.time()
+  
+  return(t2.end - t2.start)
+}))
+
+plot(1:length(t2), t2, type = "l", col = "blue", ylim = c(0,max(t1)), xlab = "Power of 10", ylab = "execute time (sec)")
+lines(1:length(t1), t1, type = "l",  col = "red")
+legend(x = "topright",  legend = c("diag(A%*%B)", "rowSums(A*t(B))"), fill = c("red", "blue"))
+       
+```
+
+#### Download the test data of Eagle 
+
+```{r}
+DIR <- "https://raw.githubusercontent.com/geo047/Example_Data/master/"
+
+if (!file.exists("mapex.dat")) {
+  download.file(paste0(DIR, "mapex.dat"))
+}
+
+if (!file.exists("phenoex.dat")) {
+  download.file(paste0(DIR, "phenoex.dat"))
+}
+
+if (!file.exists("genoex.dat.zip")) {
+  download.file(paste0(DIR, "genoex.dat.zip"))  
+}
+
+if (!file.exists("genoex.dat")) {
+  unzip("genoex.dat.zip")  
+}
+```
+
+#### Load test Data 
+
+```{r}
+Genotype <- as.matrix(fread("genoex.dat"))
+Phenotype <- fread("phenoex.dat", sep = " ")
+Mapex <- fread("mapex.dat")
+
+head(Phenotype)
+head(Mapex)
+Genotype[1:5,1:5]
+
+d.G <- dim(Genotype)
+message(sprintf("Geneotype data contains %d lines and %d SNPs", d.G[1], d.G[2]))
+message(sprintf("Geneotype data contains %s", toString(unique(sort(as.numeric(Genotype))))))
+
+d.P <- dim(Phenotype)
+message(sprintf("Phenotype contains %d lines and %d factors: %s", d.P[1], d.P[2], paste(colnames(Phenotype), collapse = ", ")))
+```
+
+#### Set Up Global Constant
+
+```{r}
+
+snps.start <- 22001
+snps.end   <- 24000
+
+cutd.fname <- function(t,s,e) sprintf("%s[%s-%s].dat", t, s, e)
+genotype_fname <- function(s,e) cutd.fname("genoex", s, e)
+mapex_fname <- function(s,e) cutd.fname("mapex", s, e)
+```
+
+#### Crop Data
+
+```{r}
+Geno <- Genotype[,snps.start:snps.end]
+colnames(Geno) = Mapex$SNP[snps.start:snps.end]
+
+write.table(Geno, file = genotype_fname(snps.start, snps.end), col.names = FALSE, row.names =  FALSE, sep = " ")
+write.table(Mapex[snps.start:snps.end,], file = mapex_fname(snps.start, snps.end), row.names =  FALSE, sep = " ", quote = FALSE)
+
+Pheno <- as.numeric(Phenotype$Bioch.HDL)
+
+# Z != I
+Z <- rbind(diag(nrow = length(Pheno)), diag(nrow = length(Pheno)))
+Pheno  <- c(Pheno, Pheno + rnorm(length(Pheno)))
+
+write.table(list("Bioch.HDL" = Pheno), "phenoex_test1.dat", row.names =  FALSE, sep = " ", quote = FALSE)
+write.table(Z, "Z_test1.dat", row.names =  FALSE, col.names = FALSE, sep = " ", quote = FALSE)
+
+Z <- rbind(diag(nrow = length(Pheno)), diag(1, nrow = 1, ncol = length(Pheno)))
+Pheno  <- c(Pheno,Pheno[1]+rnorm(1))
+
+write.table(list("Bioch.HDL" = Pheno), "phenoex_test2.dat", row.names =  FALSE, sep = " ", quote = FALSE)
+write.table(Z, "Z_test2.dat", row.names =  FALSE, col.names = FALSE, sep = " ", quote = FALSE)
+```
+
+#### Eagle Algorithm
+
+```{r}
+
+genoObj <- ReadMarker(genotype_fname(snps.start, snps.end), type = "text", AA = 0, AB = 1, BB = 2)
+mapObj  <- ReadMap(mapex_fname(snps.start, snps.end))
+
+# Z = I
+phenoObj <- ReadPheno("phenoex.dat")
+am_res1 <- AM(trait = "Bioch.HDL", geno = genoObj, pheno = phenoObj, map = mapObj, ncpu = 4, lambda = 0.1)
+
+# Z != I
+phenoObj1 <- ReadPheno("phenoex_test1.dat")
+Zmat <- ReadZmat("Z_test1.dat")
+am_res2 <- AM(trait = "Bioch.HDL", geno = genoObj, pheno = phenoObj1, map = mapObj, Zmat = Zmat, ncpu = 4, lambda = 0.1)
+
+```
+
+#### Test 1. Compare Eagle, Z = I, general Z with many second observations:
+
+```{r}
+
+Geno <- as.matrix(fread(file = genotype_fname(snps.start, snps.end), header = FALSE, sep = " "))
+Mapex <- fread(file = mapex_fname(snps.start, snps.end), sep = " ", header = TRUE)
+colnames(Geno) = Mapex$SNP
+
+Pheno.wo <- read.csv("phenoex.dat", sep = " ", header = TRUE)[,1]
+eagle.wo.Z(Y = Pheno.wo, M = Geno, Cofactor = matrix(data = 1, nrow = length(Pheno.wo), ncol = 1), gamma = 0.1)
+
+Pheno.w <- read.csv("phenoex_test1.dat", sep = " ", header = TRUE)[,1]
+Z <- as.matrix(fread("Z_test1.dat", header = FALSE, sep = " "))
+eagle.w.Z(Y = Pheno.w, M = Geno, Z = Z, Cofactor = matrix(data = 1, nrow = length(Pheno.w), ncol = 1), gamma = 0.1)
+
+```
+
+#### Eagle Algorithm
+
+```{r}
+library("Eagle")
+
+genoObj <- ReadMarker(genotype_fname(snps.start, snps.end), type = "text", AA = 0, AB = 1, BB = 2)
+mapObj <- ReadMap(mapex_fname(snps.start, snps.end))
+
+phenoObj <- ReadPheno("phenoex.dat")
+am_res1 <- AM(trait = "Bioch.HDL", geno = genoObj, pheno = phenoObj, map = mapObj, ncpu = 4, lambda = 0.1)
+
+phenoObj1 <- ReadPheno("phenoex_test2.dat")
+Zmat <- ReadZmat("Z_test2.dat")
+am_res2 <- AM(trait = "Bioch.HDL", geno = genoObj, pheno = phenoObj1, map = mapObj, Zmat = Zmat, ncpu = 4, lambda = 0.1)
+
+```
+
+#### Test 2. Compare Eagle, Z = I, general Z with only one second observation:     
+
+```{r}
+Geno <- as.matrix(read.table(file = genotype_fname(snps.start, snps.end), header = FALSE, sep = " ")) 
+Mapex <- read.table(file = mapex_fname(snps.start, snps.end), sep = " ", header = TRUE)
+colnames(Geno) = Mapex$SNP
+
+Pheno.wo <- read.csv("phenoex.dat", sep = " ", header = TRUE)[,1]
+eagle.wo.Z(Y = Pheno.wo, M = Geno, Cofactor = matrix(data = 1, nrow = length(Pheno.wo), ncol = 1), gamma = 0.1)
+
+Pheno.w <- read.csv("phenoex_test2.dat", sep = " ", header = TRUE)[,1]
+Z <- as.matrix(fread("Z_test2.dat", header = FALSE, sep = " "))
+eagle.w.Z(Y = Pheno.w, M = Geno, Z = Z, Cofactor = matrix(data = 1, nrow = length(Pheno.w), ncol = 1), gamma = 0.1)
+
+```
+
+```{r}
+.calc.loglik <- function(Y, X, Y_XB, H, H_1) {
+  n <- nrow(X)
+  loglik <- -n/2*log(2*pi) - log(det(H))/2 - crossprod(Y_XB, H_1) %*% Y_XB/2
+  return(loglik)
+}
+
+calc.loglik <- function(Y, X, Beta, K, vg, ve, Z = NULL) {
+  Y_XB <- Y - X %*% Beta
+  
+  H <- NULL
+  if (is.null(Z)) {
+    H <- vg * K + ve * diag(nrow(K))  
+  } else {
+    H <- vg * Z %*%tcrossprod(K, Z) + ve * diag(nrow(Z)) 
+  }
+  
+  H_1 <- solve(H)
+  
+  return(.calc.loglik(Y, X, Y_XB, H, H_1))
+}
+
+calc.loglik.ols <- function(Y, X, K, vg, ve, Z = NULL) {
+  
+  H <- NULL
+  if (is.null(Z)) {
+    H <- vg * K + ve * diag(nrow(K))
+  } else {
+    H <- vg * Z %*% tcrossprod(K, Z) + ve * diag(nrow(Z))
+  }
+  
+  H_1 <- solve(H)
+  
+  # ordinary least squares (OLS)
+  Beta_OLS <- solve(t(X)%*% X) %*% t(X) %*% Y
+  Y_XB_ols <- Y - X %*% Beta_OLS
+  
+  return(.calc.loglik(Y = Y, X = X, Y_XB = Y_XB_ols, H = H, H_1 = H_1))
+}
+
+calc.loglik.blue <- function(Y, X, K, vg, ve, Z = NULL) {
+  
+  H <- NULL
+  if (is.null(Z)) {
+    H <- vg * K + ve * diag(nrow(K))
+  } else {
+    H <- vg * Z %*% tcrossprod(K, Z) + ve * diag(nrow(Z))
+  }
+  H_1 <- solve(H)
+  
+  # generalized least squares (GLS)
+  # Ref C.Geyer 1992 The blup is a good thing, page 19
+  Beta_blue <- solve(t(X)%*%H_1%*%X) %*% t(X) %*% H_1 %*% Y
+  Y_XBblue <- Y - X %*% Beta_blue
+  return(.calc.loglik(Y = Y, X = X, Y_XB = Y_XBblue, H = H, H_1 = H_1))
+}
+
+calc.loglik.emma <- function(Y, X, K, vg, ve, Z = NULL) {
+  # ref: Hyun Min Kang,etc DOI: 10.1534/genetics.107.080101
+  n <- nrow(X)
+  H <- NULL
+  if (is.null(Z)) {
+    H <- K + (ve/vg) * diag(nrow(K))
+  } else {
+    H <- Z %*%tcrossprod(K, Z) + (ve/vg) * diag(nrow(Z))
+  }
+  H_1 <- solve(H)
+  Beta_emma <- solve(t(X)%*%H_1%*%X) %*% t(X) %*% H_1 %*% Y
+  Y_XB <- Y - X %*% Beta_emma
+  R <- crossprod(Y_XB, H_1) %*% Y_XB
+  message(sprintf("eagle vg: %f \t emma vg: %f", vg, R/n))
+  
+  # equation (2) page 1711
+  # loglik <- (-n*log(2*pi*vg) - log(det(H))- (crossprod(Y_XB, H_1) %*% Y_XB)/vg)/2
+  
+  # Problem: det(H) == -inf
+  # Trick: replace -n*log(2*pi*vg) - log(det(H)) by -n*log(2*pi) - log(det(H*vg))
+  loglik <- (-n*log(2*pi) - log(det(H*vg))- (crossprod(Y_XB, H_1) %*% Y_XB)/vg)/2
+  return(list("loglik" = loglik, "beta" = Beta_emma ))
+}
+
+calc.reloglik.emma <- function(Y, X, K, vg, ve, Z = NULL) {
+  # ref: Hyun Min Kang,etc DOI: 10.1534/genetics.107.080101
+  q <- ncol(X)
+  H <- K + (ve/vg) * diag(nrow(K))
+  H_1 <- solve(H)
+  res <- calc.loglik.emma(Y, X, K, vg, ve)
+  rell <- res$loglik + (q*log(2*pi*vg) + log(det(crossprod(X))) - log(det(crossprod(X,H_1)%*%X)))/2
+  return(list("loglik" = res$loglik, "re" = rell, "beta" = res$Beta_emma ))
+}
+
+calc.reloglik.mmest <- function(Y, X, K, vg, ve) {
+  # ref: Tristan, Fabien, Alain etc 2022
+  n <- nrow(X)
+  Sigma_gamma <- vg * K + ve * diag(nrow(K))
+  Sigma_gamma_1 <- solve(Sigma_gamma)
+  Beta_mmest <- solve(t(X)%*%Sigma_gamma_1%*%X) %*% t(X) %*% Sigma_gamma_1 %*% Y
+  P_gamma <- Sigma_gamma_1 - crossprod(Sigma_gamma_1, X) %>% tcrossprod(.,solve(crossprod(X, Sigma_gamma_1) %>% tcrossprod(.,t(X)))) %>% tcrossprod(.,X) %>% tcrossprod(.,t(Sigma_gamma_1))
+  reloglik <- -(log(det(crossprod(X, Sigma_gamma_1)%*%X)) + log(det(Sigma_gamma)) + crossprod(Y,P_gamma)%*%Y)/2
+  return(list("reloglik" = reloglik, "beta" = Beta_mmest ))
+}
+```
+
+```{r}
+#### 1st iteration ####
+# ve = 0.8956929
+# vg = 0.07527552
+# ml = -1132.943
+# selected_locus <- NULL
+
+#### 2nd iteration ####
+ve = 0.97581
+vg = 4.430171e-05
+ml = -1125.387
+selected_locus <- c(222)
+
+M_s <- Geno
+if (!is.null(selected_locus)) M_s <- as.matrix(Geno[, -selected_locus])
+  
+MMt <- tcrossprod(M_s)
+K <- MMt/max(MMt) + diag(0.95, nrow(MMt))
+H <- vg * K + ve * diag(nrow(K))
+
+Y = Pheno.wo
+X = matrix(data = 1, nrow = length(Pheno.wo), ncol = 1)
+if (!is.null(selected_locus)) X <- as.matrix(cbind(X, Geno[, selected_locus]))
+
+res_ols <- calc.loglik.ols(Y = Y, X = X, K = K, vg = vg, ve = ve)
+res_blue <- calc.loglik.blue(Y = Y, X = X, K = K, vg = vg, ve = ve)
+res_emma <-  calc.loglik.emma(Y = Y, X = X, K = K, vg = vg, ve = ve)
+
+res_emma_reml <- calc.reloglik.emma(Y = Y, X = X, K = K, vg = vg, ve = ve)
+res_mmest_reml <- calc.reloglik.mmest(Y = Y, X = X, K = K, vg = vg, ve = ve)
+
+message(sprintf("loglik OLS : %f \t loglik BLUE : %f \t loglik EMMA : %f", res_ols, res_blue, res_emma$loglik))
+
+res_mmest <- MMEst(Y = Y, Cofactor = X, Method = "ML",
+               VarList = list(Additive = K , Error = diag(1, length(Y))),
+               MaxIter = 400, CritLogLik = 0.0001)
+
+res_mmest.Reml <- MMEst(Y = Y, Cofactor = X,Method = "Reml",
+               VarList = list(Additive = K , Error = diag(1, length(Y))),
+               MaxIter = 400, CritLogLik = 0.000001)
+
+H <- res_mmest$NullModel$Sigma2[1] * K + res_mmest$NullModel$Sigma2[2] * diag(nrow(K))
+H_1 <- solve(H)
+# generalized least squares (GLS)
+# Ref C.Geyer 1992 The blup is a good thing, page 19
+Beta_mmest <- res_mmest$NullModel$Beta
+Y_XBmmest <- Y - X %*% Beta_mmest
+.calc.loglik(Y, X, Y_XBmmest, H, H_1)
+
+```
+
+#### Z != I 
+#### Data of Test II
+
+```{r}
+#### 1st iteration ####
+ve = 0.8938		
+vg = 0.07583533
+ml = -1133.86	
+selected_locus <- NULL
+Init <- c(vg,ve)
+
+#### 2nd iteration ####
+ml = -1126.331	
+ve = 0.9746837	
+vg = 4.425057e-05
+selected_locus <- c(222)
+
+M_s <- Geno
+if (!is.null(selected_locus)) M_s <- as.matrix(Geno[, -selected_locus])
+  
+MMt <- tcrossprod(M_s)
+K <- MMt/max(MMt) + diag(0.95, nrow(MMt))
+# H <- vg * Z %*% tcrossprod(K, Z) + ve * diag(nrow(K))
+
+Y = Pheno.w
+X = matrix(data = 1, nrow = length(Pheno.w), ncol = 1)
+if (!is.null(selected_locus)) {
+  X <- as.matrix(cbind(X, crossprod(t(Z),Geno[, selected_locus])))
+}
+
+res_ols <- calc.loglik.ols(Y = Y, X = X, K = K, vg = vg, ve = ve, Z = Z)
+res_blue <- calc.loglik.blue(Y = Y, X = X, K = K, vg = vg, ve = ve, Z = Z)
+res_emma <-  calc.loglik.emma(Y = Y, X = X, K = K, vg = vg, ve = ve, Z = Z)
+
+message(sprintf("loglik OLS : %f \t loglik BLUE : %f \t loglik EMMA : %f", res_ols, res_blue, res_emma$loglik))
+
+res_mmest <- MMEst(Y = Y, Cofactor = X, Method = "ML",
+               VarList = list(Additive = K , Error = diag(1, length(Y))),
+               ZList = list(Additive=Z, Error = diag(1, length(Y))),
+               MaxIter = 400, CritLogLik = 0.00001,CritVar = 1e-5) # , Init = Init)
+
+# res_mmest.init <- MMEst(Y = Y, Cofactor = X, Method = "ML",
+#                VarList = list(Additive = K , Error = diag(1, length(Y))),
+#                ZList = list(Additive=Z, Error = diag(1, length(Y))),
+#                MaxIter = 400, CritLogLik = 0.00001, Init = Init)
+# 
+# res_mmest.init1 <- MMEst(Y = Y, Cofactor = X, Method = "ML",
+#                VarList = list(Additive = K , Error = diag(1, length(Y))),
+#                ZList = list(Additive=Z, Error = diag(1, length(Y))),
+#                Init = Init, MaxIter=1)
+# 
+# res_mmest$NullModel$`LogLik (ML)`
+# res_mmest.init$NullModel$`LogLik (ML)`
+# res_mmest.init1$NullModel$`LogLik (ML)`
+
+H <- res_mmest$NullModel$Sigma2[1] * Z%*%tcrossprod(K,Z) + res_mmest$NullModel$Sigma2[2] * diag(nrow(Z))
+H_1 <- solve(H)
+
+Beta_BLUE <- solve(t(X)%*%H_1%*%X) %*% t(X) %*% H_1 %*% Y
+
+message(sprintf("BLUE Beta: %f, %f \t MMEST Beta: %f, %f", 
+                Beta_BLUE[1], Beta_BLUE[2], res_mmest$NullModel$Beta[1],res_mmest$NullModel$Beta[2]))
+
+res_mmest_var_beta <- calc.loglik(Y = Y, X = X, Beta = res_mmest$NullModel$Beta, K = K, Z = Z,
+            vg = res_mmest$NullModel$Sigma2[1], ve = res_mmest$NullModel$Sigma2[2])
+
+message(sprintf("MMEst Loglik: %f \t Calculate Loglik: %f", res_mmest$NullModel$`LogLik (ML)`, res_mmest_var_beta))
+
+res_mmest_var_blue_beta <- calc.loglik(Y = Y, X = X, Beta = Beta_BLUE, K = K, Z = Z,
+            vg = res_mmest$NullModel$Sigma2[1], ve = res_mmest$NullModel$Sigma2[2])
+
+message(sprintf("MMEst Beta Loglik: %f \t Blue Beta Loglik: %f", res_mmest_var_beta, res_mmest_var_blue_beta))
+
+message(sprintf("MMEst loglik: %f \t MMEst loglik Beta : %f loglik EMMA : %f", res_mmest$NullModel$`LogLik (ML)`, res_mmest_var_beta, res_emma$loglik))
+```
+
+#### compare with Gaston: Z = I 
+
+```{r}
+library(gaston)
+
+#### 1st iteration ####
+ve = 0.8938		
+vg = 0.07583533
+ml = -1133.86	
+selected_locus <- NULL
+Init <- c(vg,ve)
+
+#### 2nd iteration ####
+ml = -1126.331	
+ve = 0.9746837	
+vg = 4.425057e-05
+selected_locus <- c(222)
+
+M_s <- Geno
+if (!is.null(selected_locus)) M_s <- as.matrix(Geno[, -selected_locus])
+  
+MMt <- tcrossprod(M_s)
+K <- MMt/max(MMt) + diag(0.95, nrow(MMt))
+# H <- vg * Z %*% tcrossprod(K, Z) + ve * diag(nrow(K))
+
+X = matrix(data = 1, nrow = length(Pheno.wo), ncol = 1)
+if (!is.null(selected_locus)) {
+  X <- as.matrix(cbind(X,Geno[, selected_locus]))
+}
+
+#### Compare MMEst with Gaston : 
+
+res_mmest.ML <- MMEst(Y = Pheno.wo, Cofactor = X, Method = "ML",
+               VarList = list(Additive = K , Error = diag(1, length(Pheno.wo))),
+               MaxIter = 400, CritLogLik = 0.000001)
+
+res_mmest.Reml <- MMEst(Y = Pheno.wo, Cofactor = X,Method = "Reml",
+               VarList = list(Additive = K , Error = diag(1, length(Pheno.wo))),
+               MaxIter = 400, CritLogLik = 0.000001)
+
+reml1 <- lmm.diago.likelihood(tau = res_mmest.ML$NullModel$Sigma2["Additive"],
+                     s2 = res_mmest.ML$NullModel$Sigma2["Error"],
+                     Y = Pheno.wo, X = X, eigenK = eigen(K), p = ncol(X))
+
+reml2 <- lmm.diago.profile.likelihood(tau = res_mmest.ML$NullModel$Sigma2["Additive"],
+                     s2 = res_mmest.ML$NullModel$Sigma2["Error"],
+                     Y = Pheno.wo, X = X, eigenK = eigen(K), p = ncol(X))
+
+reml3 <- lmm.diago.likelihood(tau = res_mmest.Reml$NullModel$Sigma2["Additive"],
+                     s2 = res_mmest.Reml$NullModel$Sigma2["Error"],
+                     Y = Pheno.wo, X = X, eigenK = eigen(K), p = ncol(X))
+
+reml4 <- lmm.diago.profile.likelihood(tau = res_mmest.Reml$NullModel$Sigma2["Additive"],
+                     s2 = res_mmest.Reml$NullModel$Sigma2["Error"],
+                     Y = Pheno.wo, X = X, eigenK = eigen(K), p = ncol(X))
+
+reml5 <- lmm.diago.likelihood(tau = vg, s2 = ve,
+                     Y = Pheno.wo, X = X, eigenK = eigen(K), p = ncol(X))
+
+
+reml6 <- lmm.diago.profile.likelihood(tau = vg, s2 = ve,
+                     Y = Pheno.wo, X = X, eigenK = eigen(K), p = ncol(X))
+
+res_lmm.aireml <- lmm.aireml(Y = Pheno.wo, X = X, K = K)
+
+# H2 <- vg/(vg+ve)
+# reml4 <- lmm.diago.profile.likelihood(h2 = H2, Y = Pheno.wo, X = X, eigenK = eigen(K), p = ncol(X))
+
+message(sprintf("MMEst.ML: [vg: %f, ve: %f]\nGaston reml with MMEst VC: %f \nGaston prf ML with MMEst VC: %f\n",
+                res_mmest.ML$NullModel$Sigma2["Additive"], res_mmest.ML$NullModel$Sigma2["Error"], reml1, reml2))
+
+message(sprintf("MMEst.ReML: [vg: %f, ve: %f]\nGaston reml with MMEst VC: %f \nGaston prf ML with MMEst VC: %f\n",
+                res_mmest.Reml$NullModel$Sigma2["Additive"], res_mmest.Reml$NullModel$Sigma2["Error"], reml3, reml4))
+
+message(sprintf("EAGLE: [vg: %f, ve: %f]\nGaston reml with EAGLE VC: %f \nGaston prf ML with EAGLE VC: %f\n",  vg, ve, reml5, reml6))
+
+message(sprintf("MMEst: [vg: %f, ve: %f] ML: %f \nMMEst: [vg: %f, ve: %f] reml: %f \nlmm.aireml [vg: %f, ve: %f] reml: %f\n",
+                res_mmest.ML$NullModel$Sigma2["Additive"], res_mmest.ML$NullModel$Sigma2["Error"],
+                 res_mmest.ML$NullModel$`LogLik (ML)`,
+                res_mmest.Reml$NullModel$Sigma2["Additive"], res_mmest.Reml$NullModel$Sigma2["Error"],
+                res_mmest.Reml$NullModel$`LogLik (Reml)`, 
+                res_lmm.aireml$tau, res_lmm.aireml$sigma2, res_lmm.aireml$logL))
+```
+
+#### Compare MMEst by ReML and ML
+##### ReML and ML give the different results: 
+
+```{r}
+
+res_mmest.Reml <- MMEst(Y = Pheno.wo, Cofactor = X,Method = "Reml",
+               VarList = list(Additive = K , Error = diag(1, length(Y))),
+               MaxIter = 400, CritLogLik = 0.000001)
+
+res_mmest.ML <- MMEst(Y = Pheno.wo, Cofactor = X,Method = "ML",
+               VarList = list(Additive = K , Error = diag(1, length(Y))),
+               MaxIter = 400, CritLogLik = 0.000001)
+
+message(sprintf("res_mmest.Reml\t[vg: %f\tve: %f\tbeta: %f\t%f] \nres_mmest.ML\t[vg: %f\tve: %f\tbeta: %f\t%f]", 
+                res_mmest.Reml$NullModel$Sigma2["Additive"], res_mmest.Reml$NullModel$Sigma2["Error"], 
+                res_mmest.Reml$NullModel$Beta[1], res_mmest.Reml$NullModel$Beta[2], 
+                res_mmest.ML$NullModel$Sigma2["Additive"], res_mmest.ML$NullModel$Sigma2["Error"], 
+                res_mmest.ML$NullModel$Beta[1], res_mmest.ML$NullModel$Beta[2]))
+```
+
+#### compare with Gaston: Z != I 
+
+```{r}
+library(gaston)
+ve = 0.9746837	
+vg = 4.425057e-05
+
+#### Compare MMEst with Gaston : 
+ZKZT <- Z %*% tcrossprod(K, Z)
+
+res_mmest.ML <- MMEst(Y = Pheno.w, Cofactor = Z%*%X, Method = "ML",
+               VarList = list(Additive = K , Error = diag(1, length(Pheno.w))),
+               ZList = list(Additive=Z, Error = diag(1, length(Pheno.w))),
+               MaxIter = 400, CritLogLik = 0.000001)
+
+res_mmest.Reml <- MMEst(Y = Pheno.w, Cofactor = Z%*%X,Method = "Reml",
+               VarList = list(Additive = K , Error = diag(1, length(Pheno.w))),
+               ZList = list(Additive=Z, Error = diag(1, length(Pheno.w))),
+               MaxIter = 400, CritLogLik = 0.000001)
+
+reml1 <- lmm.diago.likelihood(tau = res_mmest.ML$NullModel$Sigma2["Additive"],
+                     s2 = res_mmest.ML$NullModel$Sigma2["Error"],
+                     Y = Pheno.w, X = Z%*%X, eigenK = eigen(ZKZT), p = ncol(X))
+
+reml2 <- lmm.diago.profile.likelihood(tau = res_mmest.ML$NullModel$Sigma2["Additive"],
+                     s2 = res_mmest.ML$NullModel$Sigma2["Error"],
+                     Y = Pheno.w, X = Z%*%X, eigenK = eigen(ZKZT), p = ncol(X))
+
+reml3 <- lmm.diago.likelihood(tau = res_mmest.Reml$NullModel$Sigma2["Additive"],
+                     s2 = res_mmest.Reml$NullModel$Sigma2["Error"],
+                     Y = Pheno.w, X = Z%*%X, eigenK = eigen(ZKZT), p = ncol(X))
+
+reml4 <- lmm.diago.profile.likelihood(tau = res_mmest.Reml$NullModel$Sigma2["Additive"],
+                     s2 = res_mmest.Reml$NullModel$Sigma2["Error"],
+                     Y = Pheno.w, X = Z%*%X, eigenK = eigen(ZKZT), p = ncol(X))
+
+reml5 <- lmm.diago.likelihood(tau = vg, s2 = ve,
+                     Y = Pheno.w, X = Z%*%X, eigenK = eigen(ZKZT), p = ncol(X))
+
+
+reml6 <- lmm.diago.profile.likelihood(tau = vg, s2 = ve,
+                     Y = Pheno.w, X = Z%*%X, eigenK = eigen(ZKZT), p = ncol(X))
+
+res_lmm.aireml <- lmm.aireml(Y = Pheno.w, X = Z%*%X, K = ZKZT)
+
+# H2 <- vg/(vg+ve)
+# reml4 <- lmm.diago.profile.likelihood(h2 = H2, Y = Pheno.wo, X = X, eigenK = eigen(K), p = ncol(X))
+
+message(sprintf("MMEst.ML: [vg: %f, ve: %f]\nGaston reml with MMEst VC: %f \nGaston prf ML with MMEst VC: %f\n",
+                res_mmest.ML$NullModel$Sigma2["Additive"], res_mmest.ML$NullModel$Sigma2["Error"], reml1, reml2))
+
+message(sprintf("MMEst.ReML: [vg: %f, ve: %f]\nGaston reml with MMEst VC: %f \nGaston prf ML with MMEst VC: %f\n",
+                res_mmest.Reml$NullModel$Sigma2["Additive"], res_mmest.Reml$NullModel$Sigma2["Error"], reml3, reml4))
+
+message(sprintf("EAGLE: [vg: %f, ve: %f]\nGaston reml with EAGLE VC: %f \nGaston prf ML with EAGLE VC: %f\n",  vg, ve, reml5, reml6))
+
+message(sprintf("MMEst: [vg: %f, ve: %f] ML: %f \nMMEst: [vg: %f, ve: %f] reml: %f \nlmm.aireml [vg: %f, ve: %f] reml: %f\n",
+                res_mmest.ML$NullModel$Sigma2["Additive"], res_mmest.ML$NullModel$Sigma2["Error"],
+                 res_mmest.ML$NullModel$`LogLik (ML)`,
+                res_mmest.Reml$NullModel$Sigma2["Additive"], res_mmest.Reml$NullModel$Sigma2["Error"],
+                res_mmest.Reml$NullModel$`LogLik (Reml)`, 
+                res_lmm.aireml$tau, res_lmm.aireml$sigma2, res_lmm.aireml$logL))
+```
+
+#### Compare MMEst by ReML and ML
+##### ReML and ML give the different results: 
+
+```{r}
+
+res_mmest.Reml <- MMEst(Y = Pheno.w, Cofactor = Z%*%X, Method = "Reml",
+               VarList = list(Additive = K , Error = diag(1, length(Pheno.w))),
+               ZList = list(Additive=Z, Error = diag(1, length(Pheno.w))),
+               MaxIter = 400, CritLogLik = 0.000001)
+
+res_mmest.ML <- MMEst(Y = Pheno.w, Cofactor = Z%*%X, Method = "ML",
+               VarList = list(Additive = K , Error = diag(1, length(Pheno.w))),
+               ZList = list(Additive=Z, Error = diag(1, length(Pheno.w))),
+               MaxIter = 400, CritLogLik = 0.000001)
+
+message(sprintf("res_mmest.Reml\t[vg: %f\tve: %f\tbeta: %f\t%f] \nres_mmest.ML\t[vg: %f\tve: %f\tbeta: %f\t%f]", 
+                res_mmest.Reml$NullModel$Sigma2["Additive"], res_mmest.Reml$NullModel$Sigma2["Error"], 
+                res_mmest.Reml$NullModel$Beta[1], res_mmest.Reml$NullModel$Beta[2], 
+                res_mmest.ML$NullModel$Sigma2["Additive"], res_mmest.ML$NullModel$Sigma2["Error"], 
+                res_mmest.ML$NullModel$Beta[1], res_mmest.ML$NullModel$Beta[2]))
+```
