@@ -1,0 +1,558 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r echo=FALSE, message=FALSE}
+library(MM4LMM)
+library(sommer)
+library(nnet)
+library(Eagle)
+library(parallel)
+library(dplyr)
+# library(tidyverse)
+
+source("Eagle_Multi_Genomes.R")
+```
+
+#### load DT data
+
+```{r}
+data(DT_technow)
+DT <- DT_technow
+
+Mf <- Mf_technow
+Md <- Md_technow
+
+Zf <- class.ind(DT$flint)
+Zf <- Zf[,rownames(Mf)]
+
+Zd <- class.ind(DT$dent)
+Zd <- Zd[,rownames(Md)]
+```
+
+#### Prepare for the simulation
+
+```{r}
+# H= S_G^2 / (S_G^2 + S_E^2)
+h = 0.9 # fixe
+
+# Y = Z1 U1 + Z2 U2 + E
+nqtl.d = 10 # fixed
+nqtl.f = 10 # fixed
+
+```
+
+#### constants
+
+```{r}
+PWD <- paste0(getwd(),"/Test_Result/")
+label <- "[adS:%d-%d][afS:%d-%d][gamma=%.2f]"
+simulation_times <- 100
+max_itr_num <- 100
+gamma <- 0.1
+```
+
+```{r echo=FALSE, message=FALSE}
+
+Ss <- readRDS(file = paste0(PWD, "Ssample"))
+Sd <- Ss$Sd
+Sf <- Ss$Sf
+rm(Ss)
+
+Md_S <- Md[, - Sd]
+Mf_S <- Mf[, - Sf]
+
+ad_S <- rep(0,ncol(Md_S))
+af_S <- rep(0,ncol(Mf_S))
+
+MdS <- Md[, Sd]
+MfS <- Mf[, Sf]
+
+a_ <- 20
+
+adS <- seq(a_,a_+nqtl.d,l=nqtl.d)
+afS <- seq(a_,a_+nqtl.f,l=nqtl.f)
+Ud <- MdS %*% adS + Md_S %*% ad_S
+Uf <- MfS %*% afS + Mf_S %*% af_S
+Uh <- Zd %*% Ud + Zf %*% Uf
+vg <- var(Uh)
+
+sigma_E <- as.numeric(sqrt(vg*(1-h)/h))
+
+s_label <- sprintf(label, adS[1], adS[nqtl.d], afS[1], afS[nqtl.f], gamma)
+
+args_X <- list()
+
+for ( itr in 1:simulation_times) {
+  
+  E <- sigma_E * rnorm(length(DT$GY))
+  Y <- Uh + E
+  itn_label = paste0(s_label, "[tn=", itr, "]")
+  write.table(list("Trait" = Y), paste0(PWD,"trait_",itn_label,".dat"), 
+              row.names =  FALSE, sep = " ", quote = FALSE)
+  
+  args_X[[itr]] <- list("adS" = adS, "afS" = afS, "s_label" = s_label, 
+                        "gamma" = gamma, "itr" = itr, 
+                        "max_itr_num" = max_itr_num) 
+}
+
+
+test_case <- function(X) {
+  adS     = X$adS
+  afS     = X$afS 
+  s_label = X$s_label
+  gamma   = X$gamma
+  itr     = X$itr
+  max_itr_num = X$max_itr_num
+  
+  itn_label = paste0(s_label, "[tn=", itr, "]")
+    
+  if (DO_EAGLE) {
+    tfname = paste0(PWD, "eagle_resultat_", itn_label)
+    if (!file.exists(tfname)) {
+      phenoObj <- ReadPheno(paste0(PWD,"trait_",itn_label,".dat"))
+      Mf_genoObj <- ReadMarker(paste0(PWD,"Mf.dat"), type = "text", AA = 0, AB = 2, BB = 1)
+      Md_genoObj <- ReadMarker(paste0(PWD,"Md.dat"), type = "text", AA = 0, AB = 2, BB = 1)
+      
+      Mf_Zmat <- ReadZmat(paste0(PWD,"Zf.dat"))
+      Md_Zmat <- ReadZmat(paste0(PWD,"Zd.dat"))
+      
+      eagle_start_time <- Sys.time()
+      Eagle_selected_locus_G1 <- AM(trait = "Trait", Zmat = Mf_Zmat, geno = Mf_genoObj, 
+                                    pheno = phenoObj, ncpu = 48, lambda = gamma, maxit = ceiling(max_itr_num/2), fixit = TRUE)
+      Eagle_selected_locus_G2 <- AM(trait = "Trait", Zmat = Md_Zmat, geno = Md_genoObj, 
+                                    pheno = phenoObj, ncpu = 48, lambda = gamma, maxit = ceiling(max_itr_num/2), fixit = TRUE)
+      eagle_end_time <- Sys.time()
+      
+      saveRDS(list("Eagle_selected_locus_G1" = Eagle_selected_locus_G1$Indx, 
+                   "Eagle_selected_locus_G2" = Eagle_selected_locus_G2$Indx, 
+                   "eagle_excute_time" = eagle_end_time - eagle_start_time), 
+              file = paste0(PWD, "eagle_resultat_", itn_label))
+    }
+  }
+  
+  if (DO_EMG) {
+    tfname = paste0(PWD, "emg_resultat_", itn_label)
+    if (!file.exists(tfname)) {
+      Y <- read.csv(paste0(PWD,"trait_",itn_label,".dat"), sep = " ", header = TRUE)[,1]
+        
+      emg_start_time <- Sys.time()
+      EMG_selected_locus <- EMG(Y = Y, G1 = Mf_technow*2, G2 = Md_technow*2, Z1 = Zf, Z2 = Zd, 
+                  genome_names = c("Flint", "Dent"), gamma = gamma, max_itr_num = max_itr_num )
+      emg_end_time <- Sys.time()
+        
+      saveRDS(list("EMG_selected_locus" = EMG_selected_locus, 
+                     "emg_excute_time" = emg_end_time - emg_start_time), 
+                  file = paste0(PWD, "emg_resultat_", itn_label))
+    }
+  }
+}
+
+```
+
+```{r}
+
+DO_EMG = TRUE
+DO_EAGLE = FALSE
+
+mclapply(args_X, test_case, mc.cores = getOption("mc.cores", 12L)) # mc.silent = TRUE, 
+
+DO_EMG = FALSE
+DO_EAGLE = TRUE
+
+for (X in args_X) {
+  message(sprintf("iteration number %d", X$itr))
+  test_case(X)
+}
+
+```
+
+  
+```{r}
+Eagle_S_selected_locus_G1_history <- list()
+Eagle_S_selected_locus_G2_history <- list()
+EMG_S_selected_locus_history <- list()
+eagle_S_excute_time_history <- c()
+emg_S_excute_time_history <- c()
+
+for ( s_idx in 1:length(S) ) {
+  s <- S[s_idx]
+  
+  adS <- seq(s,s+nqtl.d,l=nqtl.d)
+  afS <- seq(s,s+nqtl.f,l=nqtl.f)
+  
+  Ud <- MdS %*% adS + Md_S %*% ad_S
+  Uf <- MfS %*% afS + Mf_S %*% af_S
+  
+  Uh <- Zd %*% Ud + Zf %*% Uf
+  vg <- var(Uh)
+  
+  sigma_E <- as.numeric(sqrt(vg*(1-h)/h))
+  
+  s_label <- sprintf(label, adS[1], adS[nqtl.d], afS[1], afS[nqtl.f], gamma)
+  
+  Eagle_S_selected_locus_G1_history[[s_idx]] <- list()
+  Eagle_S_selected_locus_G2_history[[s_idx]] <- list()
+  EMG_S_selected_locus_history[[s_idx]] <- list()
+  eagle_S_excute_time_history[[s_idx]] <- list()
+  emg_S_excute_time_history[[s_idx]] <- list()
+  
+  for ( itr in 1:simulation_times) {
+    itn_label = paste0(s_label, "[tn=", itr, "]") 
+    print(itn_label)
+    eagle_res <- readRDS(file = paste0(PWD, "eagle_resultat_", itn_label)) 
+    emg_res <- readRDS(file = paste0(PWD, "emg_resultat_", itn_label)) 
+    
+    Eagle_S_selected_locus_G1_history[[s_idx]][[itr]] <- eagle_res$Eagle_selected_locus_G1 
+    Eagle_S_selected_locus_G2_history[[s_idx]][[itr]] <- eagle_res$Eagle_selected_locus_G2 
+    EMG_S_selected_locus_history[[s_idx]][[itr]] <- emg_res$EMG_selected_locus 
+    eagle_S_excute_time_history[[s_idx]][[itr]] <- eagle_res$eagle_excute_time
+    emg_S_excute_time_history[[s_idx]][[itr]] <- emg_res$emg_excute_time 
+  }
+}
+
+```
+  
+  
+```{r}
+nmb_qtl = length(Sf) + length(Sd)
+
+nb_radius <- 5
+
+Sf_neighborhood5 <- unlist(lapply(Sf, function(x){seq(x-nb_radius,x+nb_radius)}))
+Sd_neighborhood5 <- unlist(lapply(Sd, function(x){seq(x-nb_radius,x+nb_radius)}))
+
+eagle_TP_list = list()
+eagle_FP_list <- list()
+eagle_FN_list <- list()
+
+emg_TP_list <- list()
+emg_FP_list <- list()
+emg_FN_list <- list()
+
+S <- c(1,5,10,20,40,60,100,140,180,220,260,300,350,400,500,600,800)
+
+for ( s_idx in 1:length(S) ) {
+  s <- S[s_idx]
+  
+  eagle_TP <- c()
+  eagle_FP <- c()
+  eagle_FN <- c()
+
+  emg_TP <- c()
+  emg_FP <- c()
+  emg_FN <- c()
+  
+  for (itr in 1:simulation_times) {
+    eagle_qtl_find1 = length(Eagle_S_selected_locus_G1_history[[s_idx]][[itr]])
+    eagle_qtl_find2 = length(Eagle_S_selected_locus_G2_history[[s_idx]][[itr]])
+    eagle_qtl_find = eagle_qtl_find1 + eagle_qtl_find2
+    
+    eagle_TP1 <- length(intersect(Sf_neighborhood5, Eagle_S_selected_locus_G1_history[[s_idx]][[itr]]))
+    eagle_TP2 <- length(intersect(Sd_neighborhood5, Eagle_S_selected_locus_G2_history[[s_idx]][[itr]]))
+    
+    eagle_TP <- c(eagle_TP, eagle_TP1 + eagle_TP2)
+    eagle_FP = c(eagle_FP, eagle_qtl_find - eagle_TP[itr])
+    eagle_FN = c(eagle_FN, nmb_qtl - eagle_TP[itr])
+    
+    emg_qtl_find1 = length(EMG_S_selected_locus_history[[s_idx]][[itr]]$G1)
+    emg_qtl_find2 = length(EMG_S_selected_locus_history[[s_idx]][[itr]]$G2)
+    emg_qtl_find = emg_qtl_find1 + emg_qtl_find2
+    
+    emg_TP1 <- length(intersect(Sf_neighborhood5, EMG_S_selected_locus_history[[s_idx]][[itr]]$G1))
+    emg_TP2 <- length(intersect(Sd_neighborhood5, EMG_S_selected_locus_history[[s_idx]][[itr]]$G2))
+    
+    emg_TP <- c(emg_TP, emg_TP1 + emg_TP2)
+    emg_FP = c(emg_FP, emg_qtl_find - emg_TP[itr])
+    emg_FN = c(emg_FN, nmb_qtl - emg_TP[itr])
+  }
+  
+  eagle_TP_list[[s_idx]] <- eagle_TP
+  eagle_FP_list[[s_idx]] <- eagle_FP
+  eagle_FN_list[[s_idx]] <- eagle_FN
+
+  emg_TP_list[[s_idx]] <- emg_TP
+  emg_FP_list[[s_idx]] <- emg_FP
+  emg_FN_list[[s_idx]] <- emg_FN
+}
+```
+
+#### TP, FP, FN
+
+```{r}
+library(ggplot2)
+
+S <- c(1,5,10,20,40,60,100,140,180,220,260,300,350,400,500,600,800)
+a = rep(paste0(S), each=simulation_times)
+algo = rep(c("eagle","emg"), each=10)
+TP = c()
+
+for ( s_idx in 1:length(S) ) {
+  TP = c(TP, eagle_TP_list[[s_idx]])
+  TP = c(TP, emg_TP_list[[s_idx]])
+}
+
+data_TP = data.frame(a, algo,  TP)
+
+TP_mean <- data_TP %>% 
+            group_by(a,algo) %>% 
+            summarize(average = mean(TP)) %>% 
+            ungroup()
+
+TP_mean_eagle <- TP_mean %>% filter(algo=="eagle")
+TP_mean_emg <- TP_mean %>% filter(algo=="emg")
+
+ggplot(data_TP, aes(x=reorder(a, as.numeric(a)), y=TP, fill=algo), main = "True Positive") + geom_boxplot() + geom_point(data = TP_mean_eagle, mapping = aes(x = reorder(a, as.numeric(a)), y = average), color="red") + geom_line(data=TP_mean_eagle, mapping = aes(x = reorder(a, as.numeric(a)), y = average, group=1), colour = "red") + geom_point(data = TP_mean_emg, mapping = aes(x = reorder(a, as.numeric(a)), y = average), color="blue") + geom_line(data=TP_mean_emg, mapping = aes(x = reorder(a, as.numeric(a)), y = average, group=1), colour = "blue")
+
+# plot(x = c(1:9)/10, y = unlist(lapply(eagle_TP_list, mean)), type = "l") 
+# lines(x = c(1:9)/10, y = unlist(lapply(emg_TP_list, mean)), type = "l") 
+       
+FP= c()
+for ( s_idx in 1:length(S) ) {
+  FP = c(FP, eagle_FP_list[[s_idx]])
+  FP = c(FP, emg_FP_list[[s_idx]])
+}
+
+data_FP = data.frame(a, algo,  FP)
+
+FP_mean <- data_FP %>% 
+            group_by(a,algo) %>% 
+            summarize(average = mean(FP)) %>% 
+            ungroup()
+
+FP_mean_eagle <- FP_mean %>% filter(algo=="eagle")
+FP_mean_emg <- FP_mean %>% filter(algo=="emg")
+
+ggplot(data_FP, aes(x=reorder(a, as.numeric(a)), y=FP, fill=algo), main = "False Positive") + geom_boxplot() + geom_point(data = FP_mean_eagle, mapping = aes(x = reorder(a, as.numeric(a)), y = average), color="red") + geom_line(data=FP_mean_eagle, mapping = aes(x = reorder(a, as.numeric(a)), y = average, group=1), colour = "red") + geom_point(data = FP_mean_emg, mapping = aes(x = reorder(a, as.numeric(a)), y = average), color="blue") + geom_line(data=FP_mean_emg, mapping = aes(x = reorder(a, as.numeric(a)), y = average, group=1), colour = "blue")
+
+FN= c()
+for ( s_idx in 1:length(S) ) {
+  FN = c(FN, eagle_FN_list[[s_idx]])
+  FN = c(FN, emg_FN_list[[s_idx]])
+}
+
+data_FN = data.frame(a, algo,  FN)
+
+FN_mean <- data_FN %>% 
+            group_by(a,algo) %>% 
+            summarize(average = mean(FN)) %>% 
+            ungroup()
+
+FN_mean_eagle <- FN_mean %>% filter(algo=="eagle")
+# FN_mean_eagle <- bind_cols(average = FN_mean_eagle$average, gamma = as.numeric(FN_mean_eagle$gamma)-0.02)
+
+FN_mean_emg <- FN_mean %>% filter(algo=="emg")
+# FN_mean_emg <- bind_cols(average = FN_mean_emg$average, gamma = as.numeric(FN_mean_emg$gamma)+0.02)
+
+ggplot(data_FP, aes(x=reorder(a, as.numeric(a)), y=FN, fill=algo), main = "False Positive") + geom_boxplot() + geom_point(data = FN_mean_eagle, mapping = aes(x = reorder(a, as.numeric(a)), y = average), color="red") + geom_line(data=FN_mean_eagle, mapping = aes(x = reorder(a, as.numeric(a)), y = average, group=1), colour = "red") + geom_point(data = FN_mean_emg, mapping = aes(x = reorder(a, as.numeric(a)), y = average), color="blue") + geom_line(data=FN_mean_emg, mapping = aes(x = reorder(a, as.numeric(a)), y = average, group=1), colour = "blue")
+```
+
+#### courbe de nombre de TP en fonction de snps sélectionnés 
+
+```{r}
+Ss <- readRDS(file = paste0(PWD, "Ssample"))
+
+Sd <- Ss$Sd
+Sf <- Ss$Sf
+
+a_ <- 20
+
+adS <- seq(a_,a_+nqtl.d,l=nqtl.d)
+afS <- seq(a_,a_+nqtl.f,l=nqtl.f)
+
+nb_radius <- 5
+
+Sf_neighborhood <- lapply(Sf, function(x){seq(x-nb_radius,x+nb_radius)})
+Sd_neighborhood <- lapply(Sd, function(x){seq(x-nb_radius,x+nb_radius)})
+
+trancate_eagle_result <- function(G1, G2, nmb_qtl) {
+  if (nmb_qtl >= length(G1)+length(G2)) {
+    return(list("G1" = G1, "G2" = G2))
+  }
+  
+  G1_count = ceiling(nmb_qtl/2)
+  
+  if (G1_count < length(G1)) {
+    return(list("G1" = G1[1:G1_count], "G2" = G2[1:(nmb_qtl - G1_count)]))
+  }
+  
+  return(list("G1" = G1, "G2" = G2[1:nmb_qtl-length(G1)]))
+  
+}
+
+trancate_emg_result <- function(G1, G2, selection_order, nmb_qtl) {
+  if (nmb_qtl >= length(selection_order)) {
+    return(list("G1" = G1, "G2" = G2))
+  }
+  
+  G1_count = sum(selection_order[1:nmb_qtl] == 1)
+  
+  if (G1_count == 0) return(list("G1" = c(), "G2" = G2[1:nmb_qtl]))
+  if (G1_count == nmb_qtl) return(list("G1" = G1[1:G1_count], "G2" = c()))
+  return(list("G1" = G1[1:G1_count], "G2" = G2[1:(nmb_qtl-G1_count)]))
+}
+
+eagle_TP1_list = list()
+eagle_TP2_list = list()
+
+eagle_TP_list = list()
+
+eagle_FP_list <- list()
+eagle_FN_list <- list()
+
+emg_TP1_list <- list()
+emg_TP2_list <- list()
+
+emg_TP_list <- list()
+
+emg_FP_list <- list()
+emg_FN_list <- list()
+
+max_trancate_num <- 50
+total_test_num   <- 50
+
+for (trancate_idx in 1:max_trancate_num) {
+    
+    eagle_TP1 <- c()
+    eagle_TP2 <- c()
+    
+    eagle_FP <- c()
+    eagle_FN <- c()
+  
+    emg_TP1 <- c()
+    emg_TP2 <- c()
+    
+    emg_FP <- c()
+    emg_FN <- c()
+    
+    for (simulation_num in 1:total_test_num) {
+      
+      s_label <- sprintf(label, adS[1], adS[nqtl.d], afS[1], afS[nqtl.f], gamma)
+      
+      itn_label = paste0(s_label, "[tn=", simulation_num, "]")
+      
+      res_eagle <- readRDS(file = paste0(PWD, "eagle_resultat_", itn_label))
+      
+      trancated_eagle_res <- trancate_eagle_result(G1 = res_eagle$Eagle_selected_locus_G1[2:length(res_eagle$Eagle_selected_locus_G1)],
+                                                   G2 = res_eagle$Eagle_selected_locus_G2[2:length(res_eagle$Eagle_selected_locus_G2)],
+                                                   nmb_qtl = trancate_idx)
+  
+      res_emg <- readRDS(file = paste0(PWD, "emg_resultat_", itn_label))
+      
+      trancated_emg_res <- trancate_emg_result(G1 = res_emg$EMG_selected_locus$G1, 
+                                               G2 = res_emg$EMG_selected_locus$G2,
+                                               selection_order = res_emg$EMG_selected_locus$order,
+                                               nmb_qtl = trancate_idx)
+      
+      # EMG_selected_locus_order <- res_emg$order[1:trancate_idx]
+    
+      eagle_TP1 <- c(eagle_TP1, length(intersect(unlist(Sf_neighborhood), trancated_eagle_res$G1)))
+      eagle_TP2 <- c(eagle_TP2, length(intersect(unlist(Sd_neighborhood), trancated_eagle_res$G2)))
+      
+      emg_TP1 <- c(emg_TP1, length(intersect(unlist(Sf_neighborhood), trancated_emg_res$G1)))
+      emg_TP2 <- c(emg_TP2, length(intersect(unlist(Sd_neighborhood), trancated_emg_res$G2)))
+
+    
+    }
+    
+  eagle_TP1_list[[trancate_idx]] <- eagle_TP1
+  eagle_TP2_list[[trancate_idx]] <- eagle_TP2
+  eagle_TP_list[[trancate_idx]]  <- eagle_TP1 + eagle_TP2
+  eagle_FP_list[[trancate_idx]]  <- trancate_idx - (eagle_TP1 + eagle_TP2)
+  
+  emg_TP1_list[[trancate_idx]] <- emg_TP1
+  emg_TP2_list[[trancate_idx]] <- emg_TP2
+  emg_TP_list[[trancate_idx]]  <- emg_TP1 + emg_TP2
+  emg_FP_list[[trancate_idx]]  <- trancate_idx - (emg_TP1 + emg_TP2)
+}
+
+eagle_TP1 <- matrix(unlist(eagle_TP1_list), ncol = max_trancate_num, nrow = total_test_num)
+eagle_TP2 <- matrix(unlist(eagle_TP2_list), ncol = max_trancate_num, nrow = total_test_num)
+eagle_TP  <- eagle_TP1 + eagle_TP2
+
+emg_TP1 <- matrix(unlist(emg_TP1_list), ncol = max_trancate_num, nrow = total_test_num)
+emg_TP2 <- matrix(unlist(emg_TP2_list), ncol = max_trancate_num, nrow = total_test_num)
+emg_TP  <- emg_TP1 + emg_TP2
+
+```
+
+
+#### TP
+
+```{r}
+library(ggplot2)
+
+
+total_selected_snps_num = rep(paste0(1:max_trancate_num), each = total_test_num*2)
+algo = rep(c("eagle","emg"), each = total_test_num)
+TP = c()
+
+for ( t_idx in 1:max_trancate_num ) {
+  TP = c(TP, eagle_TP_list[[t_idx]])
+  TP = c(TP, emg_TP_list[[t_idx]])
+}
+
+data_TP = data.frame(total_selected_snps_num, algo,  TP)
+
+TP_mean <- data_TP %>% 
+            group_by(total_selected_snps_num,algo) %>% 
+            summarize(average = mean(TP)) %>% 
+            ungroup()
+
+TP_mean_eagle <- TP_mean %>% filter(algo=="eagle")
+TP_mean_emg <- TP_mean %>% filter(algo=="emg")
+
+# png(filename="TP.png", width=1200, height=600)
+
+ggplot(data_TP, aes(x=reorder(total_selected_snps_num, as.numeric(total_selected_snps_num)), y=TP, fill=algo), main = "True Positive") + geom_boxplot() + geom_point(data = TP_mean_eagle, mapping = aes(x = reorder(total_selected_snps_num, as.numeric(total_selected_snps_num)), y = average), color="red") + geom_line(data=TP_mean_eagle, mapping = aes(x = reorder(total_selected_snps_num, as.numeric(total_selected_snps_num)), y = average, group=1), colour = "red") + geom_point(data = TP_mean_emg, mapping = aes(x = reorder(total_selected_snps_num, as.numeric(total_selected_snps_num)), y = average), color="blue") + geom_line(data=TP_mean_emg, mapping = aes(x = reorder(total_selected_snps_num, as.numeric(total_selected_snps_num)), y = average, group=1), colour = "blue")
+
+# dev.off()
+
+
+FP= c()
+
+for ( t_idx in 1:max_trancate_num ) {
+  FP = c(FP, eagle_FP_list[[t_idx]])
+  FP = c(FP, emg_FP_list[[t_idx]])
+}
+
+data_FP = data.frame(total_selected_snps_num, algo,  FP)
+
+FP_mean <- data_FP %>% 
+            group_by(total_selected_snps_num,algo) %>% 
+            summarize(average = mean(FP)) %>% 
+            ungroup()
+
+FP_mean_eagle <- FP_mean %>% filter(algo=="eagle")
+FP_mean_emg <- FP_mean %>% filter(algo=="emg")
+
+# png(filename="FP.png", width=1200, height=600)
+
+ggplot(data_FP, aes(x=reorder(total_selected_snps_num, as.numeric(total_selected_snps_num)), y=FP, fill=algo), main = "False Positive") + geom_boxplot() + geom_point(data = FP_mean_eagle, mapping = aes(x = reorder(total_selected_snps_num, as.numeric(total_selected_snps_num)), y = average), color="red") + geom_line(data=FP_mean_eagle, mapping = aes(x = reorder(total_selected_snps_num, as.numeric(total_selected_snps_num)), y = average, group=1), colour = "red") + geom_point(data = FP_mean_emg, mapping = aes(x = reorder(total_selected_snps_num, as.numeric(total_selected_snps_num)), y = average), color="blue") + geom_line(data=FP_mean_emg, mapping = aes(x = reorder(total_selected_snps_num, as.numeric(total_selected_snps_num)), y = average, group=1), colour = "blue")
+
+# dev.off()
+```
+
+
+
+# ROC Curve
+
+```{r}
+TPR = function(TP,FN) TP/(TP+FN) 
+FPR = function(FP,TN) FP/(FP+TN)
+
+eagle_TPR = c()
+eagle_FPR = c()
+
+emg_TPR = c()
+emg_FPR = c()
+
+for (gamma_idx in 1:9) {
+    eagle_TPR = c(eagle_TPR, mean(TPR(eagle_TP_list[[gamma_idx]],eagle_FP_list[[gamma_idx]])))
+    eagle_FPR 
+    emg_TPR   = c(emg_TPR,  mean(TPR(emg_TP_list[[gamma_idx]],emg_TP_list[[gamma_idx]])))
+}
+
+```
+

@@ -1,0 +1,633 @@
+---
+title: "Compare ML and ReML method"
+output: html_notebook
+---
+
+```{r echo=FALSE, message=FALSE}
+library(MM4LMM)
+library(sommer)
+library(nnet)
+library(Eagle)
+library(parallel)
+library(dplyr)
+
+source("Eagle_Multi_Genomes.R")
+```
+
+#### load DT data
+
+```{r}
+data(DT_technow)
+DT <- DT_technow
+
+Mf <- Mf_technow
+Md <- Md_technow
+
+Zf <- class.ind(DT$flint)
+Zf <- Zf[,rownames(Mf)]
+
+Zd <- class.ind(DT$dent)
+Zd <- Zd[,rownames(Md)]
+```
+
+#### simulation settings 
+
+```{r}
+hs <- c(0.9, 0.7, 0.5)
+bs <- c(0.65, 0.45) # 0.15 is impossible
+
+simulation_times <- 10
+max_itr_num <- 80
+gamma <- 0.0
+
+# test_hs <- rep(hs, each = simulation_times*length(bs))
+# test_bs <- rep(bs, simulation_times*length(hs))
+# test_tn <- rep(floor(seq(1,simulation_times+0.5,0.5)), length(hs))
+
+test_hs <- rep(hs, each = simulation_times*length(bs))
+test_bs <- rep(bs, each = simulation_times)
+test_tn <- rep(seq(1,simulation_times), length(hs)*length(bs))
+
+data.frame(test_hs, test_bs, test_tn)
+
+ad_ <-10 # fixed
+af_ <-10 # fixed 
+
+nqtl.d = 10 # fixed
+nqtl.f = 10 # fixed
+
+Freq.d <- colMeans(Md)
+Freq.f <- colMeans(Mf)
+    
+Poly.size.d <- 10000 # fixed
+Poly.size.f <- 10000 # fixed
+
+Poly.effet.d <- 1
+Poly.effet.f <- 1
+
+PWD <- paste0(getwd(),"/Test_Result07/")
+label <- "[ad_=%d][af_=%d][gamma=%.2f][h=%.2f][Poly.size.d=%d][Poly.size.f=%d][Poly.effet.d=%.3f][Poly.effet.f=%.3f][tn=%d][b=%.2f]"
+
+GM <- read.csv(paste0(getwd(),"/GeneticMap.xls"))
+chrom_list <- unique(GM$chrom)
+total_pos_per_chrom <- unlist(lapply(chrom_list, function(chrom) {return(sum(GM$chrom==chrom))}))
+
+save_model <- function(Sd, Sf, adS, afS, ad_S, af_S, E = E, fname) {
+  saveRDS(object = list("E" = E, "Sd" = Sd, "Sf" = Sf, 
+                        "adS" = adS, "afS" = afS, 
+                        "ad_S" = ad_S, "af_S" = af_S), file = fname)
+}
+
+save_trait <- function(Y, fname) {
+  write.table(list("Trait" = Y), file = fname, 
+              row.names =  FALSE, sep = " ", quote = FALSE)
+}
+
+sl_label <- function(h, b, tn) {
+  return(sprintf(label, ad_, af_, gamma, h, Poly.size.d, Poly.size.f, Poly.effet.d, Poly.effet.f, tn, b))
+}
+
+model_fname <- function(h, b, tn) {
+  return(paste0(PWD, "model_", sl_label(h,b,tn), ".rds"))
+}
+
+trait_fname <- function(h, b, tn) {
+  return(paste0(PWD, "trait_", sl_label(h,b,tn), ".dat"))
+}
+
+sl <- function (h, b, tn) {
+  
+  if (file.exists(model_fname(h,b,tn))) {
+    return(NULL)
+  }
+  
+  while(TRUE) {
+    
+    # simulation qtl sur tous les chrom sauf 1 ou 2
+    Chrom.d.sample <- chrom_list[-sample(chrom_list,2)]
+    Chrom.f.sample <- chrom_list[-sample(chrom_list,2)]
+    
+    chrom.pos.d <- apply(data.frame(lapply(Chrom.d.sample, function(chrom) return(GM$chrom == chrom))), 
+                         1, function(row) return(sum(row)>0))
+    chrom.pos.f <- apply(data.frame(lapply(Chrom.f.sample, function(chrom) return(GM$chrom == chrom))), 
+                         1, function(row) return(sum(row)>0))
+    
+    Informative.d <- which(Freq.d>10/nrow(Md) & Freq.d< 1-10/nrow(Md) & chrom.pos.d)
+    Informative.f <- which(Freq.f>10/nrow(Mf) & Freq.f< 1-10/nrow(Mf) & chrom.pos.f)
+    
+    Sd <- sample(Informative.d, nqtl.d)
+    Sf <- sample(Informative.f, nqtl.f)
+    
+    MdS <- Md[, Sd]
+    MfS <- Mf[, Sf]
+    
+    Md_S <- Md[, -Sd]
+    Mf_S <- Mf[, -Sf]
+    
+    ad_S <- rep(0,ncol(Md_S))
+    af_S <- rep(0,ncol(Mf_S))
+
+    ad_S[sample(1:length(ad_S), Poly.size.d)] <- runif(min = -Poly.effet.d, max = Poly.effet.d, n = Poly.size.d)
+    af_S[sample(1:length(af_S), Poly.size.f)] <- runif(min = -Poly.effet.f, max = Poly.effet.f, n = Poly.size.f)
+      
+    adS <- seq(ad_,ad_+nqtl.d,l=nqtl.d)
+    afS <- seq(af_,af_+nqtl.f,l=nqtl.f)
+    
+    Ud <- MdS %*% adS + Md_S %*% ad_S
+    Uf <- MfS %*% afS + Mf_S %*% af_S
+    
+    Uh <- Zd %*% Ud + Zf %*% Uf
+    Ua <- Zd %*% MdS %*% adS + Zf %*% MfS %*% afS 
+    
+    vg <- var(Uh)
+    va <- var(Ua)
+    
+    a_ratio <- va/vg
+    
+    if (a_ratio < (b+0.02) && a_ratio > (b-0.02)) {
+      sigma_E <- as.numeric(sqrt(vg*(1-h)/h))
+      E <- sigma_E * rnorm(length(DT$GY))
+      Y <- Uh + E
+      
+      save_model(Sd = Sd, Sf = Sf, adS = adS, afS = afS, 
+                 ad_S = adS, af_S = af_S, E = E, fname = model_fname(h,b,tn))
+      
+      save_trait(Y, fname = trait_fname(h,b,tn))
+      
+      return(a_ratio)
+    }
+  }
+}
+
+```
+
+# find available effets additives
+
+```{r}
+
+simu <- function (a_) {
+  Freq.d <- colMeans(Md)
+  Freq.f <- colMeans(Mf)
+ 
+  Informative.d <- which(Freq.d>10/nrow(Md) & Freq.d< 1- 10/nrow(Md))
+  Informative.f <- which(Freq.f>10/nrow(Mf) & Freq.f< 1- 10/nrow(Mf))
+ 
+  Sd <- sample(Informative.d, nqtl.d)
+  Sf <- sample(Informative.f, nqtl.f)
+ 
+  MdS <- Md[, Sd]
+  MfS <- Mf[, Sf]
+ 
+  Md_S <- Md[, - Sd]
+  Mf_S <- Mf[, - Sf]
+ 
+  ad_S <- rep(0,ncol(Md_S))
+  af_S <- rep(0,ncol(Mf_S))
+ 
+  Poly.effet.d <- 1 # c(0.1, 0.01)
+  Poly.effet.f <- 1 # c(0.1, 0.01)
+ 
+  ad_S[sample(1:length(ad_S), Poly.size.d)] <- runif(min = -Poly.effet.d, max = Poly.effet.d, n = Poly.size.d)
+  af_S[sample(1:length(af_S), Poly.size.d)] <- runif(min = -Poly.effet.f, max = Poly.effet.f, n = Poly.size.d)
+    
+  adS <- seq(a_,a_+nqtl.d,l=nqtl.d)
+  afS <- seq(a_,a_+nqtl.f,l=nqtl.f)
+ 
+  Ud <- MdS %*% adS + Md_S %*% ad_S
+  Uf <- MfS %*% afS + Mf_S %*% af_S
+ 
+  Uh <- Zd %*% Ud + Zf %*% Uf
+  Ua <- Zd %*% MdS %*% adS + Zf %*% MfS %*% afS
+ 
+  vh <- var(Uh)
+  va <- var(Ua)
+  if (va/vh < b + 0.05) return(a_)
+}
+
+A_ <- c()
+for (i in 1:10) {
+  A_ <- unique(c(A_,unlist(mclapply(1:100, simu, mc.cores = getOption("mc.cores", 48L)))))
+}
+A_ # so 10 is OK
+```
+
+
+# do simulation 
+
+```{r}
+# mcmapply(sl, h = test_hs, b = test_bs, tn = test_tn, mc.cores = getOption("mc.cores", 48L))
+
+for (h in hs) {
+  for (b in bs) {
+    for (tn in c(1:simulation_times)){
+      print(sprintf("h: %.2f b: %.2f tn: %d", h, b, tn))
+      sl(h, b, tn)
+    }
+  }
+}
+```
+
+
+```{r echo=FALSE, message=FALSE}
+
+test_case <- function(h, b, tn) {
+    
+  if (DO_EAGLE) {
+    
+    tfname = paste0(PWD, "Eagle_Results/eagle_resultat_", sl_label(h,b,tn))
+    
+    if (REDO || !file.exists(tfname)) {
+      phenoObj <- ReadPheno(paste0(trait_fname(h,b,tn)))
+      Mf_genoObj <- ReadMarker(paste0(PWD,"Mf.dat"), type = "text", AA = 0, AB = 2, BB = 1)
+      Md_genoObj <- ReadMarker(paste0(PWD,"Md.dat"), type = "text", AA = 0, AB = 2, BB = 1)
+      
+      Mf_Zmat <- ReadZmat(paste0(PWD,"Zf.dat"))
+      Md_Zmat <- ReadZmat(paste0(PWD,"Zd.dat"))
+      
+      eagle_start_time <- Sys.time()
+      Eagle_selected_locus_G1 <- AM(trait = "Trait", Zmat = Mf_Zmat, geno = Mf_genoObj, 
+                                    pheno = phenoObj, ncpu = 48, lambda = gamma, maxit = ceiling(max_itr_num/2), fixit = TRUE)
+      Eagle_selected_locus_G2 <- AM(trait = "Trait", Zmat = Md_Zmat, geno = Md_genoObj, 
+                                    pheno = phenoObj, ncpu = 48, lambda = gamma, maxit = ceiling(max_itr_num/2), fixit = TRUE)
+      eagle_end_time <- Sys.time()
+      
+      saveRDS(list("Eagle_selected_locus_G1" = Eagle_selected_locus_G1$Indx, 
+                   "Eagle_selected_locus_G2" = Eagle_selected_locus_G2$Indx, 
+                   "Eagle_G1_extBIC" = Eagle_selected_locus_G1$extBIC, 
+                   "Eagle_G2_extBIC" = Eagle_selected_locus_G2$extBIC, 
+                   "eagle_excute_time" = eagle_end_time - eagle_start_time), 
+              file = paste0(PWD, "Eagle_Results/eagle_resultat_", sl_label(h,b,tn)))
+    }
+  }
+  
+  if (DO_EMG) {
+    
+    if (method == "Reml") {
+      tfname = paste0(PWD, "EMG_Results/emg_resultat_", sl_label(h,b,tn), "[Method=Reml]")
+    } else {
+      tfname = paste0(PWD, "EMG_Results/emg_resultat_", sl_label(h,b,tn))
+    }
+    
+    # tfname = paste0(PWD, "EMG_Results/emg_resultat_", sl_label(h,b,tn), "[K=Eagle]")
+    
+    if (REDO || !file.exists(tfname)) {
+      
+      Y <- read.csv(trait_fname(h,b,tn), sep = " ", header = TRUE)[,1]
+        
+      emg_start_time <- Sys.time()
+      EMG_selected_locus <- EMG(Y = Y, G1 = Mf_technow*2, G2 = Md_technow*2, Z1 = Zf, Z2 = Zd, 
+                  genome_names = c("Flint", "Dent"), gamma = gamma, max_itr_num = max_itr_num, Method = method)
+      emg_end_time <- Sys.time()
+        
+      saveRDS(list("EMG_selected_locus" = EMG_selected_locus, 
+                    "emg_excute_time" = emg_end_time - emg_start_time), 
+                    file = tfname)
+    }
+  }
+}
+
+```
+
+```{r}
+# method <- "Reml"
+method <- "ML"
+DO_EMG = TRUE
+DO_EAGLE = FALSE
+REDO = FALSE
+
+mcmapply(test_case, h = rep(hs, each = simulation_times*length(bs)), 
+          b = rep(bs, simulation_times*length(hs)), 
+          tn = rep(floor(seq(1,simulation_times+0.5,0.5)), length(hs)), 
+          mc.cores = getOption("mc.cores", 12L))
+
+DO_EMG = FALSE
+DO_EAGLE = TRUE
+REDO = FALSE
+# simulation_times = 100
+
+args_X <- data.frame("h" = rep(hs, each = simulation_times*length(bs)), 
+                     "b" = rep(bs, simulation_times*length(hs)), 
+                    "tn" = rep(floor(seq(1,simulation_times+0.5,0.5)), length(hs)))
+
+for (i in 1:dim(args_X)[1]) {
+  test_case(h = args_X[i,]$h, b = args_X[i,]$b, tn = args_X[i,]$tn)
+}
+
+```
+
+#### courbe de nombre de TP en fonction de snps sélectionnés 
+
+```{r}
+# hs <- c(0.5, 0.7, 0.9)
+# bs <- c(0.45, 0.65) # 0.15 is impossible
+
+h = 0.9
+b = 0.65
+
+window_size <- 1000000
+max_trancate_num <- 80
+neighborhood_radius <- window_size/2
+
+DO_EAGLE <- TRUE
+DO_EMG <- TRUE
+eagle_total_test_times <- 10
+emg_total_test_times   <- 10
+
+# method = "ML"
+# neighborhoods
+# nhbrhd <- function(S, nb_radius=5) sapply(S, function(x){seq(x-nb_radius,x+nb_radius)})
+
+GM <- read.csv(paste0(getwd(),"/GeneticMap.xls"))
+chrom_list <- unique(GM$chrom)
+total_pos_per_chrom <- unlist(lapply(chrom_list, function(chrom) {return(sum(GM$chrom==chrom))}))
+
+nhbrhds <- function(S, nb_radius=500000) {
+  
+  lapply(S, function(x){
+    
+    neighbors <- c(x)
+    chrom <- GM$chrom[x]
+    pos   <- GM$pos[x]
+    x_l <- x - 1
+    x_r <- x + 1
+    
+    while (x_l > 0 && GM$chrom[x_l] == chrom && GM$pos[x_l] >= pos - nb_radius) {
+      neighbors <- c(x_l, neighbors)
+      x_l <- x_l - 1
+    }
+    
+    while (x_r <= nrow(GM) && GM$chrom[x_r] == chrom && GM$pos[x_r] <= pos + nb_radius) {
+      neighbors <- c(neighbors, x_r)
+      x_r <- x_r + 1
+    }
+    
+    return(neighbors)
+  })
+}
+
+count_TP <- function(X, neighborhoods) {
+  pred.tps <- intersect(unlist(neighborhoods), unlist(X))
+  ture.tps.idx <- c()
+  for (tp in pred.tps) {
+    ture.tps.idx <- c(ture.tps.idx, sapply(1:length(neighborhoods), FUN = function(n){
+      if (tp %in% neighborhoods[[n]]) return(n)
+    }))
+  }
+  ture.tps.idx <- unique(Filter(Negate(is.null), ture.tps.idx))
+  return(list("pred" = pred.tps, 
+              "true" = ture.tps.idx,
+              "p.count" = length(pred.tps),
+              "t.count" = length(ture.tps.idx)))
+}
+
+trancate_eagle_result <- function(G1, G2, nmb_qtl) {
+
+  if (nmb_qtl >= length(G1)+length(G2)) {
+    return(list("G1" = G1, "G2" = G2))
+  }
+  
+  G1_count = ceiling(nmb_qtl/2)
+  
+  if (G1_count < length(G1)) {
+    return(list("G1" = G1[1:G1_count], "G2" = G2[1:(nmb_qtl - G1_count)]))
+  }
+  
+  tryCatch({
+    return(list("G1" = G1, "G2" = G2[1:(nmb_qtl-length(G1))]))
+  }, error = function(cond) {
+    print(cond)
+    print(sprintf("[ERROR] length(G1): %d, length(G2): %d, nmb_qtl: %d",length(G1), length(G2), nmb_qtl))
+  })
+}
+
+trancate_emg_result <- function(G1, G2, selection_order, nmb_qtl) {
+  if (nmb_qtl >= length(selection_order)) {
+    return(list("G1" = G1, "G2" = G2))
+  }
+  
+  G1_count = sum(selection_order[1:nmb_qtl] == 1)
+  
+  if (G1_count == 0) return(list("G1" = c(), "G2" = G2[1:nmb_qtl]))
+  if (G1_count == nmb_qtl) return(list("G1" = G1[1:G1_count], "G2" = c()))
+  return(list("G1" = G1[1:G1_count], "G2" = G2[1:(nmb_qtl-G1_count)]))
+}
+
+eagle_TP1_list <- list()
+eagle_TP2_list <- list()
+eagle_TP_list  <- list()
+
+eagle_FP1_list <- list()
+eagle_FP2_list <- list()
+eagle_FP_list  <- list()
+
+
+emg_TP1_list <- list()
+emg_TP2_list <- list()
+emg_TP_list  <- list()
+
+emg_FP1_list <- list()
+emg_FP2_list <- list()
+emg_FP_list  <- list()
+
+# Load Model informations and Test Results
+
+model_list   <- list()
+res_eag_list <- list()
+res_emg_list <- list()
+Sd_neighborhood <- list()
+Sf_neighborhood <- list()
+
+for (tn in c(1:simulation_times)) {
+  model_list[[tn]] <- readRDS(model_fname(h,b,tn))
+  Sd_neighborhood[[tn]] <- nhbrhds(model_list[[tn]]$Sd, neighborhood_radius)
+  Sf_neighborhood[[tn]] <- nhbrhds(model_list[[tn]]$Sf, neighborhood_radius)
+}
+
+Sd_nghb_count <- length(unlist(Sd_neighborhood)) / simulation_times
+Sf_nghb_count <- length(unlist(Sf_neighborhood)) / simulation_times
+
+if (DO_EAGLE) {
+  for (tn in c(1:eagle_total_test_times)) {
+    res_eag_list[[tn]] <- readRDS(file = paste0(PWD, "Eagle_Results/eagle_resultat_", sl_label(h,b,tn)))
+  }
+}
+
+if (DO_EMG) {
+  for (tn in c(1:emg_total_test_times)) {
+    if (method == "Reml") {
+      res_emg_list[[tn]] <- readRDS(file = paste0(PWD, "EMG_Results/emg_resultat_", sl_label(h,b,tn), "[Method=Reml]"))
+    } else {
+      # ML
+      res_emg_list[[tn]] <- readRDS(file = paste0(PWD, "EMG_Results/emg_resultat_", sl_label(h,b,tn)))
+    }
+    # res_emg_list[[tn]] <- readRDS(file = paste0(PWD, "EMG_Results/emg_resultat_", sl_label(h,b,tn)), "[K=Eagle]")
+  }
+}
+
+for (trancate_idx in 1:max_trancate_num) {
+    
+    eagle_TP1 <- c()
+    eagle_TP2 <- c()
+    
+    eagle_FP1 <- c()
+    eagle_FP2 <- c()
+  
+    emg_TP1 <- c()
+    emg_TP2 <- c()
+    
+    emg_FP1 <- c()
+    emg_FP2 <- c()
+    
+    if (DO_EAGLE) {
+      for (tn in c(1:eagle_total_test_times)) {
+          
+          trancated_eagle_res <- trancate_eagle_result(G1 = res_eag_list[[tn]]$Eagle_selected_locus_G1[2:length(res_eag_list[[tn]]$Eagle_selected_locus_G1)],
+                                                       G2 = res_eag_list[[tn]]$Eagle_selected_locus_G2[2:length(res_eag_list[[tn]]$Eagle_selected_locus_G2)],
+                                                       nmb_qtl = trancate_idx)
+      
+          TP1 <- count_TP(trancated_eagle_res$G1, Sf_neighborhood[[tn]])
+          TP2 <- count_TP(trancated_eagle_res$G2, Sd_neighborhood[[tn]])
+          
+          eagle_TP1 <- c(eagle_TP1, TP1$t.count)
+          eagle_TP2 <- c(eagle_TP2, TP2$t.count)
+          
+          eagle_FP1 <- c(eagle_FP1, trancate_idx - TP1$p.count)
+          eagle_FP2 <- c(eagle_FP2, trancate_idx - TP2$p.count)
+        }
+    }
+    
+    if (DO_EMG) {
+      for (tn in c(1:emg_total_test_times)) {
+        
+        trancated_emg_res <- trancate_emg_result(G1 = res_emg_list[[tn]]$EMG_selected_locus$G1, 
+                                                 G2 = res_emg_list[[tn]]$EMG_selected_locus$G2,
+                                                 selection_order = res_emg_list[[tn]]$EMG_selected_locus$order,
+                                                 nmb_qtl = trancate_idx)
+        
+        TP1 <- count_TP(trancated_emg_res$G1, Sf_neighborhood[[tn]])
+        TP2 <- count_TP(trancated_emg_res$G2, Sd_neighborhood[[tn]])
+        
+        emg_TP1 <- c(emg_TP1, TP1$t.count)
+        emg_TP2 <- c(emg_TP2, TP2$t.count)
+        
+        # emg_TP1 <- c(emg_TP1, TP1$p.count)
+        # emg_TP2 <- c(emg_TP2, TP2$p.count)
+        
+        emg_FP1 <- c(emg_FP1, trancate_idx - TP1$p.count)
+        emg_FP2 <- c(emg_FP2, trancate_idx - TP2$p.count)
+        
+      }
+    }
+    
+  eagle_TP1_list[[trancate_idx]] <- eagle_TP1
+  eagle_TP2_list[[trancate_idx]] <- eagle_TP2
+  eagle_TP_list[[trancate_idx]]  <- eagle_TP1 + eagle_TP2
+  
+  eagle_FP1_list[[trancate_idx]] <- eagle_FP1
+  eagle_FP2_list[[trancate_idx]] <- eagle_FP2
+  eagle_FP_list[[trancate_idx]]  <- eagle_FP1 + eagle_FP2
+
+  emg_TP1_list[[trancate_idx]] <- emg_TP1
+  emg_TP2_list[[trancate_idx]] <- emg_TP2
+  emg_TP_list[[trancate_idx]]  <- emg_TP1 + emg_TP2
+  
+  emg_FP1_list[[trancate_idx]] <- emg_FP1
+  emg_FP2_list[[trancate_idx]] <- emg_FP2
+  emg_FP_list[[trancate_idx]]  <- emg_FP1 + emg_FP2
+  
+}
+
+eagle_TP1 <- matrix(unlist(eagle_TP1_list), ncol = max_trancate_num, nrow = eagle_total_test_times)
+eagle_FP1 <- matrix(unlist(eagle_FP1_list), ncol = max_trancate_num, nrow = eagle_total_test_times)
+
+eagle_TP2 <- matrix(unlist(eagle_TP2_list), ncol = max_trancate_num, nrow = eagle_total_test_times)
+eagle_FP2 <- matrix(unlist(eagle_FP2_list), ncol = max_trancate_num, nrow = eagle_total_test_times)
+
+eagle_TP <- matrix(unlist(eagle_TP_list), ncol = max_trancate_num, nrow = eagle_total_test_times)
+eagle_FP <- matrix(unlist(eagle_FP_list), ncol = max_trancate_num, nrow = eagle_total_test_times)
+
+emg_TP1   <- matrix(unlist(emg_TP1_list), ncol = max_trancate_num, nrow = emg_total_test_times)
+emg_FP1   <- matrix(unlist(emg_FP1_list), ncol = max_trancate_num, nrow = emg_total_test_times)
+
+emg_TP2   <- matrix(unlist(emg_TP2_list), ncol = max_trancate_num, nrow = emg_total_test_times)
+emg_FP2   <- matrix(unlist(emg_FP2_list), ncol = max_trancate_num, nrow = emg_total_test_times)
+
+emg_TP   <- matrix(unlist(emg_TP_list), ncol = max_trancate_num, nrow = emg_total_test_times)
+emg_FP   <- matrix(unlist(emg_FP_list), ncol = max_trancate_num, nrow = emg_total_test_times)
+```
+
+#### Plots
+
+```{r}
+library(ggplot2)
+
+# nombre de TP en fonction du nombre de snps selectionnes 
+
+plot(1:max_trancate_num, unlist(lapply(data.frame(emg_TP), max)),type = "l", ylim = c(0,nqtl.d +nqtl.f), col = "red",
+     xlab = "selected SNPs number", ylab = "True Positive", main = sprintf("EMG MAX heritability=%.2f balance=%.2f window size=%d",h,b,window_size))
+lines(1:max_trancate_num, unlist(lapply(data.frame(emg_TP1), max)), col = "blue")
+lines(1:max_trancate_num, unlist(lapply(data.frame(emg_TP2), max)), col = "yellow")
+lines(1:max_trancate_num, unlist(lapply(data.frame(eagle_TP), max)), col = "black")
+legend("topleft", legend=c("emg total", "flint", "dent", "eagle total"), col=c("red", "blue", "yellow", "black"), lty = 1:2, cex=0.8)
+
+plot(1:max_trancate_num, unlist(lapply(data.frame(eagle_TP), max)),type = "l", ylim = c(0,nqtl.d +nqtl.f), col = "red",
+     xlab = "selected SNPs number", ylab = "True Positive", main = sprintf("EAGLE MAX heritability=%.2f balance=%.2f window size=%d",h,b,window_size))
+lines(1:max_trancate_num, unlist(lapply(data.frame(eagle_TP1), max)), col = "blue")
+lines(1:max_trancate_num, unlist(lapply(data.frame(eagle_TP2), max)), col = "yellow")
+lines(1:max_trancate_num, unlist(lapply(data.frame(emg_TP), max)), col = "black")
+legend("topleft", legend=c("eagle total", "flint", "dent", "emg total"), col=c("red", "blue", "yellow", "black"), lty = 1:2, cex=0.8)
+
+plot(1:max_trancate_num, unlist(lapply(data.frame(emg_TP), mean)),type = "l", ylim = c(0,nqtl.d +nqtl.f), col = "red",
+     xlab = "selected SNPs number", ylab = "True Positive", main = sprintf("EMG MEAN heritability=%.2f balance=%.2f window size=%d",h,b,window_size))
+lines(1:max_trancate_num, unlist(lapply(data.frame(emg_TP1), mean)), col = "blue")
+lines(1:max_trancate_num, unlist(lapply(data.frame(emg_TP2), mean)), col = "yellow")
+lines(1:max_trancate_num, unlist(lapply(data.frame(eagle_TP), mean)), col = "black")
+legend("topleft", legend=c("emg total", "flint", "dent", "eagle total"), col=c("red", "blue", "yellow", "black"), lty = 1:2, cex=0.8)
+
+plot(1:max_trancate_num, unlist(lapply(data.frame(eagle_TP), mean)),type = "l", ylim = c(0,nqtl.d +nqtl.f), col = "red",
+     xlab = "selected SNPs number", ylab = "True Positive", main = sprintf("EAGLE MEAN heritability=%.2f balance=%.2f window size=%d",h,b,window_size))
+lines(1:max_trancate_num, unlist(lapply(data.frame(eagle_TP1), mean)), col = "blue")
+lines(1:max_trancate_num, unlist(lapply(data.frame(eagle_TP2), mean)), col = "yellow")
+lines(1:max_trancate_num, unlist(lapply(data.frame(emg_TP), mean)), col = "black")
+legend("topleft", legend=c("eagle total", "flint", "dent", "emg total"), col=c("red", "blue", "yellow", "black"), lty = 1:2, cex=0.8)
+
+# AUC: Area Under the Curve
+auc <- function(ratio_list) {
+  return(sum(ratio_list)/length(ratio_list))
+}
+
+# ROC Curve TPR and FPR
+
+# TPR = TP / P
+TPR_EMG  <- unlist(lapply(data.frame(emg_TP), mean))  / (nqtl.f + nqtl.d)
+TPR_EMG1 <- unlist(lapply(data.frame(emg_TP1), mean)) / nqtl.f
+TPR_EMG2 <- unlist(lapply(data.frame(emg_TP2), mean)) / nqtl.d 
+
+# FPR = FP / N
+FPR_EMG  <- unlist(lapply(data.frame(emg_FP), mean)) / (ncol(Mf) + ncol(Md) - Sf_nghb_count - Sd_nghb_count)
+FPR_EMG1 <- unlist(lapply(data.frame(emg_FP1), mean)) / (ncol(Mf) - Sf_nghb_count)
+FPR_EMG2 <- unlist(lapply(data.frame(emg_FP2), mean)) / (ncol(Md) - Sd_nghb_count)
+
+# TPR = TP / P
+TPR_EAG  <- unlist(lapply(data.frame(eagle_TP), mean))  / (nqtl.d +nqtl.f)
+TPR_EAG1 <- unlist(lapply(data.frame(eagle_TP1), mean)) / nqtl.f
+TPR_EAG2 <- unlist(lapply(data.frame(eagle_TP2), mean)) / nqtl.d
+
+# FPR = FP / N
+FPR_EAG  <- unlist(lapply(data.frame(eagle_FP), mean))  / (ncol(Mf) + ncol(Md) - Sf_nghb_count - Sd_nghb_count)
+FPR_EAG1 <- unlist(lapply(data.frame(eagle_FP1), mean)) / (ncol(Mf) - Sf_nghb_count)
+FPR_EAG2 <- unlist(lapply(data.frame(eagle_FP2), mean)) / (ncol(Md) - Sd_nghb_count)
+
+plot(FPR_EMG,TPR_EMG, type = "l", xlim=c(0,0.0025), ylim=c(0,1), xlab = "FPR (False Positive Rate)",ylab = "TPR (True Positive Rate)",
+  main = sprintf("EMG ROC Curve heritability=%.2f balance=%.2f window size=%d",h,b,window_size), col = "red")
+lines(FPR_EMG1,TPR_EMG1, col="blue")
+lines(FPR_EMG2,TPR_EMG2, col="yellow")
+lines(FPR_EAG,TPR_EAG, col="black")
+
+plot(FPR_EAG,TPR_EAG, type = "l", xlim=c(0,0.0025), ylim=c(0,1), xlab = "FPR (False Positive Rate)",ylab = "TPR (True Positive Rate)",
+  main = sprintf("EAGLE ROC Curve heritability=%.2f balance=%.2f window size=%d",h,b,window_size), col = "red")
+lines(FPR_EAG1,TPR_EAG1, col="blue")
+lines(FPR_EAG2,TPR_EAG2, col="yellow")
+lines(FPR_EMG,TPR_EMG, col="black")
+
+```
