@@ -1,0 +1,353 @@
+---
+title: "R Notebook"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+```{r}
+library("Eagle")
+library("MM4LMM")
+
+geno_fname <- "stage_partie1/genoex[22001-23000].dat"
+pheno_fname <- "stage_partie1/phenoex.dat"
+genoObj   <- ReadMarker(geno_fname, type = "text", AA = 0, AB = 1, BB = 2)
+phenoObj <- ReadPheno(pheno_fname)
+
+M <- as.matrix(read.csv(geno_fname, sep = " ", header = FALSE))
+Y <- read.csv(pheno_fname, sep = " ")[,1]
+```
+
+#### 01. Eagle set -1, 0, 1 to AA, AB, BB
+
+```{r}
+MMt <- Eagle:::calculateMMt(geno = genoObj[["tmpM"]], availmemGb = genoObj[["availmemGb"]], 
+    ncpu = 4, dim_of_M = genoObj[["dim_of_M"]], selected_loci = NA, 
+    quiet = FALSE)
+
+# set  -1, 0, 1 to AA, AB, BB 
+myMMt <- tcrossprod(M-1)
+plot(MMt, myMMt)
+```
+
+#### Eagle rescale MMt
+
+```{r}
+MMt <- Eagle:::.calcMMt(geno = genoObj, quiet = FALSE, selected_loci = NA, ncpu = 4)
+myMMt <- tcrossprod(M-1)
+
+# rescale 
+myMMt <- myMMt/max(myMMt) + diag(0.95, nrow(myMMt))
+
+plot(MMt, myMMt)
+```
+
+#### variance
+
+```{r}
+
+# MM4LMM
+intercept <- matrix(data = 1, nrow = nrow(M), ncol = 1)
+res <- MMEst(Y = Y, Cofactor = intercept, Method = "ML", VarList = list(Additive = MMt , Error = diag(1, length(Y)))) 
+vg = res$NullModel$Sigma2["Additive"]
+ve = res$NullModel$Sigma2["Error"]
+lambda = ve/vg
+Beta = res$NullModel$Beta
+loglik <- res$NullModel$`LogLik (ML)` # depends on MMEst setup of Method
+message(sprintf("MM4LMM:   log likelihood: %f, var G: %f, var E: %f, lambda: %f", loglik, vg, ve, lambda))
+
+# EAGLE
+res <- Eagle:::emma.MLE(y = phenoObj[,"Bioch.HDL"], X = intercept, K = MMt, Z = NULL, eig.L = Eagle:::emma.eigen.L.wo.Z(MMt))
+best_vg <- res$vg
+best_ve <- res$ve
+lambda <- res$delta
+loglik <- res$ML
+message(sprintf("emma.MLE: log likelihood: %f, var G: %f, var E: %f, lambda: %f", loglik, best_vg, best_ve, lambda))
+```
+
+#### snps scores: there is some differeces between our snps scores and the ones of eagle
+
+```{r}
+source("find_qtl.R")
+
+# Our algorithm
+L = ncol(M)
+res <- svd(M-1) # parameters of random effect
+beta_hat <- c(crossprod(t(tcrossprod(tcrossprod(res$v, diag(res$d/(res$d**2 + L*lambda))),res$u)), Y - crossprod(t(intercept),Beta)))
+# beta_hat <- c(crossprod(t(tcrossprod(tcrossprod(res$v, diag(res$d/(res$d**2 + L*lambda))),res$u)), Y))
+diag_beta_hat <- c(ve * crossprod(t(res$v**2), (res$d**2)/((res$d**2+lambda*L)**2)))
+snps_scores <- beta_hat**2/diag_beta_hat
+
+# Eagle
+MMt_sqrt_and_sqrtinv <- Eagle:::calculateMMt_sqrt_and_sqrtinv(MMt = MMt, checkres = FALSE)
+invMMt <- chol2inv(chol(MMt))
+fq <- .my_find_qtl(MMt_sqrt_and_sqrtinv = MMt_sqrt_and_sqrtinv, 
+          Zmat = diag(nrow = ncol(MMt)), geno = genoObj, availmemGb = genoObj[["availmemGb"]], 
+          selected_loci = NA, MMt = MMt, 
+          invMMt = invMMt, best_ve = best_ve, best_vg = best_vg, 
+          currentX = as.matrix(intercept), ncpu = 4, 
+          quiet = TRUE, trait = phenoObj[, "Bioch.HDL"], itnum = 1)
+
+fq2 <- .my_find_qtl(MMt_sqrt_and_sqrtinv = MMt_sqrt_and_sqrtinv, 
+          geno = genoObj, availmemGb = genoObj[["availmemGb"]], 
+          selected_loci = NA, MMt = MMt, 
+          invMMt = invMMt, best_ve = best_ve, best_vg = best_vg, 
+          currentX = as.matrix(intercept), ncpu = 4, 
+          quiet = TRUE, trait = phenoObj[, "Bioch.HDL"], itnum = 1)
+
+plot(fq$outlierstat, snps_scores)
+```
+
+```{r}
+plot.new() 
+par(mar=c(2,2,2,2))
+plot(1:length(snps_scores), snps_scores, col="blue",axes=F,xlab="",ylab="")
+par(new = T)
+plot(1:length(fq$outlierstat),fq$outlierstat, col="red",axes=F,xlab="",ylab="") 
+```
+
+#### our beta hat is equivalent to the one of eagle
+
+```{r}
+plot(fq$hat_a, beta_hat * L)
+Ms <- M-1
+myMMt <- tcrossprod(M-1)
+# myMMt <- myMMt/max(myMMt) + diag(0.95, nrow(myMMt))
+
+my_beta_hat1 <- t(Ms) %*% solve(Ms%*%t(Ms)  +diag(L*lambda, nrow = nrow(Ms))) %*% (Y - crossprod(t(intercept),Beta))
+my_beta_hat2 <- t(Ms) %*% solve(Ms%*%t(Ms)/L+diag(  lambda, nrow = nrow(Ms))) %*% (Y - crossprod(t(intercept),Beta))/L
+my_beta_hat3 <- t(Ms) %*% solve(myMMt+diag(  lambda, nrow = nrow(Ms))) %*% (Y - crossprod(t(intercept),Beta))
+
+X <- intercept
+myMMt <- myMMt/max(myMMt)
+Kinship <- myMMt + diag(0.95, nrow(myMMt))
+# Sigma_gamma <- diag(best_ve, nrow = nrow(Kinship)) + best_vg * Kinship
+Sigma_gamma <- diag(ve, nrow = nrow(Kinship)) + vg * Kinship
+Sigma_gamma_1 <- solve(Sigma_gamma)
+P_gamma <- Sigma_gamma_1 - Sigma_gamma_1 %*% X %*% solve( t(X) %*% Sigma_gamma_1 %*% X) %*% t(X) %*% Sigma_gamma_1
+my_beta_hat4 <- t(Ms) %*% P_gamma %*% Y
+plot(beta_hat, my_beta_hat4)
+plot(fq$hat_a, my_beta_hat4)
+m1 = mean(fq$hat_a / my_beta_hat4)
+
+# var_u <- best_vg * Kinship
+var_Y <- Sigma_gamma
+var_u_hat <- Kinship %*% P_gamma %*% var_Y %*% t(P_gamma) %*% Kinship
+K_1 <- solve(Kinship)
+diag_var_beta_hat <- diag(t(Ms) %*% K_1 %*% var_u_hat %*% K_1 %*% Ms)
+
+plot(fq$var_hat_a, diag_var_beta_hat)
+
+m2 = mean(fq$var_hat_a/diag_var_beta_hat)
+m1**2 / m2
+
+eagle_scores <- fq$hat_a**2/fq$var_hat_a
+my_scores <- my_beta_hat4**2/diag_var_beta_hat
+
+plot(eagle_scores, fq$outlierstat)
+plot(my_scores, fq$outlierstat)
+
+# which.max(fq$outlierstat)
+plot(fq$outlierstat, fq2$outlierstat)
+
+indx = which(my_scores == max(my_scores))
+#### more than one snps reach the best score
+indx
+#### actually, the snps have the same observation
+sum(abs(M[, indx] - M[, indx[sort.list(indx, decreasing = TRUE)]]))
+```
+
+#### our variance of beta hat is NOT equivalent to the one of eagle
+
+```{r}
+plot(diag_beta_hat * L**2, fq$var_hat_a)
+```
+
+#### self-inspection: compare diag_beta_hat of our algorithm to our formula of variance
+
+```{r}
+Ms <- M - 1
+# invM_lmd <- chol2inv(chol(Ms%*%t(Ms) + diag(L*lambda, nrow = nrow(Ms))))
+# var_beta_hat <- ve * t(Ms) %*% invM_lmd %*% invM_lmd %*% Ms
+MMt2 <- crossprod(Ms%*%t(Ms) + diag(L*lambda, nrow = nrow(Ms)))
+var_beta_hat <- ve * t(Ms) %*% solve(MMt2) %*% Ms
+plot(diag_beta_hat, diag(var_beta_hat))
+```
+
+#### TODO: compare the formula of variance and the one of eagle
+
+#### verify the formula of the transformation from variance of reduce a_hat to a_hat
+
+#### !!! Problem: MMt is rescaled, but reducedtransform still use M - 1
+
+```{r}
+MMt <- Eagle:::.calcMMt(geno = genoObj, quiet = FALSE, selected_loci = NA, ncpu = 4)
+MMt_sqrt_and_sqrtinv <- Eagle:::calculateMMt_sqrt_and_sqrtinv(MMt = MMt, checkres = FALSE)
+inverse_sqrt_MMt <- MMt_sqrt_and_sqrtinv["inverse_sqrt_MMt"][[1]]
+reducedTransform <- function(X) diag(t(M-1) %*% inverse_sqrt_MMt %*% X %*% inverse_sqrt_MMt %*% (M-1))
+plot(reducedTransform(fq$var_hat_a_reduce), fq$var_hat_a)
+```
+
+#### so test with TRUE MMt, the test is NOT going to work because the real MMt is not inversible in practice
+
+```{r}
+udv <- svd(tcrossprod(Ms))
+udv$d[which(udv$d < 1e-10)] <- 0
+sqrtMMt <- udv$u %*% diag(sqrt(udv$d)) %*% t(udv$u)
+# inv_sqrt_MMt <- solve(sqrtMMt)
+# my_reduced_var_a <- Eagle:::calculate_reduced_vara(varE = best_ve, varG = best_vg, X = intercept, 
+#                                                    MMtsqrt = sqrtMMt, invMMt = sqrtMMt) # invMMt is useless in the function
+# reducedTransform <- function(X) diag(t(Ms) %*% inv_sqrt_MMt %*% X %*% inv_sqrt_MMt %*% Ms)
+# plot(reducedTransform(my_reduced_var_a), diag_beta_hat)
+```
+
+#### after an intuitive observation, it maybe caused by the formula in Eagle:::calculate_reduced_vara
+
+##### original formula: vars \<- varG \* diag(nrow(D1)) - (D1 + D1 %*% C %*% solve(A - B %*% D1 %*% C) %*% B %*% D1)
+
+##### Test 1, change to vars \<- varG \* diag(nrow(D1)) - (D1 - D1 %*% C %*% solve(A - B %*% D1 %*% C) %*% B %*% D1)
+
+##### Test 2, change to vars \<- varG \* diag(nrow(D1)) - (D1 + D1 %*% C %*% solve(A + B %*% D1 %*% C) %*% B %*% D1)
+
+##### Test 3, change to vars \<- varG \* diag(nrow(D1)) + (D1 + D1 %*% C %*% solve(A + B %*% D1 %*% C) %*% B %*% D1)
+
+##### Test 4, change to vars \<- varG \* diag(nrow(D1)) + (D1 - D1 %*% C %*% solve(A - B %*% D1 %*% C) %*% B %*% D1)
+
+##### Test 2 is more concentrate than the origin, BUT still NOT Equivlent
+
+```{r}
+source("calculate_reduced_vara.R")
+Ms <- M - 1
+MMt_sqrt_and_sqrtinv <- Eagle:::calculateMMt_sqrt_and_sqrtinv(MMt = MMt, checkres = FALSE)
+my_reduced_var_a <- my_calculate_reduced_vara(varE = best_ve, varG = best_vg, X = intercept, 
+                                                   MMtsqrt = MMt_sqrt_and_sqrtinv[["sqrt_MMt"]], 
+                                                   invMMt = MMt_sqrt_and_sqrtinv[["inverse_sqrt_MMt"]])
+reducedTransform <- function(X) diag(t(Ms) %*% inverse_sqrt_MMt %*% X %*% inverse_sqrt_MMt %*% Ms)
+par(mfrow=c(2,2))
+plot(reducedTransform(my_reduced_var_a), diag_beta_hat, main = "modify eagle's formula")
+plot(fq$var_hat_a, diag_beta_hat, main = "eagle's original formula")
+plot(fq$hat_a**2/reducedTransform(my_reduced_var_a), beta_hat**2/diag_beta_hat, main = "modify eagle's formula")
+plot(fq$outlierstat, snps_scores, main = "eagle's original formula")
+```
+
+#### verify the formula for the variance of reduce a hat
+
+```{r}
+udv <- svd(tcrossprod(Ms))
+# udv$d[which(udv$d < 1e-10)] <- 0
+sqrtMMt <- udv$u %*% diag(sqrt(udv$d)) %*% t(udv$u)
+# sqrtMMt <- MMt_sqrt_and_sqrtinv[["sqrt_MMt"]]
+my_reduced_var_a <- Eagle:::calculate_reduced_vara(varE = best_ve, varG = best_vg, X = intercept, 
+                                                   MMtsqrt = sqrtMMt, invMMt = sqrtMMt) # invMMt is useless in the function
+
+reducedTransform <- function(X) diag(t(Ms) %*% inverse_sqrt_MMt %*% X %*% inverse_sqrt_MMt %*% Ms)
+
+udv <- svd(Ms)
+d <- udv$d
+a <- 1/(d**2+lambda)
+
+X <- as.matrix(intercept)
+A <- best_vg * tcrossprod(udv$v)
+B <- best_ve * udv$v %*% diag(a) %*% t(udv$v)
+C <- best_ve * udv$v %*% diag(a/d) %*% t(udv$u) %*% X %*% solve(crossprod(X) - t(X)%*% udv$u %*% diag((d**2)*a) %*% t(udv$u) %*% X) %*% t(X) %*% udv$u %*% diag(a/d) %*% t(udv$v)
+
+my_var_a_hat <- A - B - C
+
+plot(reducedTransform(my_reduced_var_a), diag(my_var_a_hat))
+```
+
+#### test by each part of the formula
+
+```{r}
+varE <- best_ve
+varG <- best_vg
+lambda <- best_ve/best_vg
+Ms <- matrix(rnorm(1200)*10, nrow = 30) + diag(nrow=30, ncol=40)
+# X  <- matrix(1, nrow = 30, ncol = 1)
+X  <- matrix(rnorm(300)*10, nrow = 30, ncol = 10)
+# X  <- matrix(rnorm(3)+2, nrow = 3, ncol = 1)
+
+MMt <- tcrossprod(Ms)
+MMt.eigen <- eigen(tcrossprod(Ms))
+MMt.eigen$sqrt_values <- sqrt(MMt.eigen$values)
+
+# diag(crossprod(MMt.eigen$vectors))
+# plot(crossprod(MMt.eigen$vectors), diag(30))
+
+MMtsqrt <- MMt.eigen$vectors %*% diag(sqrt(MMt.eigen$values)) %*% t(MMt.eigen$vectors)
+inverse_sqrt_MMt <- MMt.eigen$vectors %*% diag(1/sqrt(MMt.eigen$values)) %*% t(MMt.eigen$vectors)
+
+# udv <- svd(Ms)
+# MMtsqrt <- udv$u %*% diag(sqrt(udv$d)) %*% t(udv$u)
+# inverse_sqrt_MMt <- udv$u %*% diag(1/sqrt(udv$d)) %*% t(udv$u)
+reducedTransform <- function(X) diag(t(Ms) %*% inverse_sqrt_MMt %*% X %*% inverse_sqrt_MMt %*% Ms)
+
+Ze <- MMtsqrt
+A <- (1/varE) * crossprod(X)
+B <- (1/varE) * t(X) %*% Ze
+C <- (1/varE) * t(Ze) %*% X
+D <- (1/varE) * t(Ze) %*% Ze + (1/varG) * diag(nrow(MMtsqrt))
+D1 <- solve(D)
+
+vars <- varG * diag(nrow(D1)) - (D1 + D1 %*% C %*% solve(A - B %*% D1 %*% C) %*% B %*% D1)
+
+# Part I: D^-1
+# myD1 <- varE * udv$u %*% diag(1/(udv$d**2 + lambda)) %*% t(udv$u)
+myD <- (1/varE) * MMt.eigen$vectors %*% diag(MMt.eigen$values + lambda) %*% t(MMt.eigen$vectors)
+myD1 <- varE * MMt.eigen$vectors %*% diag(1/(MMt.eigen$values + lambda)) %*% t(MMt.eigen$vectors)
+# par(mfrow=c(1,2))
+# plot(D, myD)
+plot(D1, myD1, main = expression(paste("Verify Part I: ", D^-1)))
+
+# Part II: D^-1 B^T
+myD1BT <- MMt.eigen$vectors %*% diag(sqrt(MMt.eigen$values)/(MMt.eigen$values + lambda)) %*% t(MMt.eigen$vectors) %*% X
+plot(D1%*%t(B), myD1BT, main = expression(paste("Verify Part II: ", D^-1 %*% B^T)))
+
+# Part III: B D^-1 B^T
+myBD1BT <- 1/varE * t(X) %*% MMt.eigen$vectors %*% diag(MMt.eigen$values/(MMt.eigen$values + lambda)) %*% t(MMt.eigen$vectors) %*% X
+plot(B%*%D1%*%t(B), myBD1BT, main = expression(paste("Verify Part III: ", B %*% D^-1 %*% B^T)))
+
+# Part IV: A - B D^-1 B^T 
+myA_BD1BT <- varE * (t(X) %*% MMt.eigen$vectors %*% (diag(1-MMt.eigen$values/(MMt.eigen$values+lambda))) %*% t(MMt.eigen$vectors) %*% X)
+plot(A-B%*%D1%*%t(B), myA_BD1BT, main = expression(paste("Verify Part IV: ", A - B %*% D^-1 %*% B^T )))
+
+# Part V: 
+my_var_reduced_a_hat <- varG * diag(nrow=nrow(myD1)) - (myD1 + myD1BT %*% solve(myA_BD1BT) %*% t(myD1BT))
+plot(vars, my_var_reduced_a_hat,  main = expression(paste("Verify Part V: ", sigma^2^G%*%I-(D^-1+D^-1%*%C%*%(A-B%*%D^-1%*%C)^-1%*%B%*%D^-1))))
+
+# Part VI: 
+# (MMt.eigen$vectors %*% diag(1/(MMt.eigen$values+lambda*ncol(Ms))**2) %*% t(MMt.eigen$vectors))
+
+# check if the eigen vectors given by svd is same as the ones of eigen: NO, they are different
+udv <- svd(Ms)
+plot(udv$u, MMt.eigen$vectors)
+
+# calculate v^T for the cas of taking eigen vectors as u
+vt <- (1/MMt.eigen$sqrt_values) * t(MMt.eigen$vectors) %*% Ms
+plot(Ms, MMt.eigen$vectors%*%diag(MMt.eigen$sqrt_values)%*%vt)
+
+# our formula for the variance of the alpha, validated in the previous section
+MMt2 <- crossprod(MMt + diag(ncol(Ms)*lambda, nrow = nrow(Ms)))
+var_alpha <- ve * t(Ms) %*% solve(MMt2) %*% Ms
+simple_var_alpha <- varE * t(vt) %*% diag(MMt.eigen$values/((MMt.eigen$values+lambda*ncol(Ms))**2)) %*% vt
+plot(var_alpha, simple_var_alpha, main = expression(paste("Verify Part VI: ", sigma^2^G * M^T %*% (M%*%M^T+L*lambda %*%I)^-2 %*% M)))
+
+my_var_a_hat <- reducedTransform(my_var_reduced_a_hat)
+plot(my_var_a_hat, diag(var_alpha), main = "eagle's variances of hat a and ours' are not equivelent")
+```
+
+```{r}
+```
+
+## Essai latex
+
+$\sigma^2_G$ 
+$\hat \beta_{BLUP}$
+\begin{eqnarray}
+U &=& toto \\
+&=& titi+1
+\end{eqnarray}
+
+
+
+
