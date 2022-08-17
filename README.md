@@ -1,2 +1,2 @@
 # AgroParisTechInternship
-Internship at AgroParisTech 2022
+Internship in AgroParisTech 2022
