@@ -1,0 +1,206 @@
+---
+title: "Simulation of the Interaction"
+output: html_notebook
+---
+
+```{r}
+require("nnet")
+require("parallel")
+require("Rfast")
+require("dplyr")
+```
+
+#### fast tensor products
+
+```{r}
+.col.tensor.product<- function(A,B) {
+  if (ncol(A) == ncol(B)) return(matrix(mapply(function(x, i) x * B[,i], A, col(A)), ncol = ncol(A)))
+}
+
+.row.tensor.product<- function(A,B) {
+  if (nrow(A) == nrow(B)) return(t(.col.tensor.product(t(A), t(B))))
+}
+
+.tensor.product <- function(A,B) {
+  # https://en.wikipedia.org/wiki/Tensor_product
+  AoB <- A%o%B
+  return(do.call(rbind, mclapply(1:nrow(A), function(i) do.call(cbind,  lapply(1:ncol(A), function(j) (AoB)[i,j,,])), 
+                                 mc.cores = getOption("mc.cores", 48L))))
+}
+```
+
+
+#### Load Host(Tomato) and Pathogens(Phytophthora capsici)
+
+```{r}
+
+H.GM <- read.table(file = "tomatoGM.dat", sep = " ", header = TRUE)
+H.GT <- read.csv(file = "tomatoGT.dat", sep = " ", header = FALSE)
+
+P.GM <- read.table("P.CapsiciGM.dat", sep = " ", header = TRUE)
+P.GT <- read.table("P.CapsiciGT.dat", sep = " ", header = FALSE)
+
+H <- t(H.GT) - 1
+P <- t(P.GT) - 1
+
+```
+
+```{r}
+
+n1 <- 50
+n2 <- 40
+
+while (TRUE) {
+  Hs <- lapply(1:n1, function(x) sort(sample(1:nrow(H), n2)))
+  Ps <- lapply(1:n1, function(x) sort(sample(1:nrow(P), n2)))
+  if (length(unique(unlist(Hs))) == nrow(H) && length(unique(unlist(Ps))) == nrow(P)) break 
+}
+
+Zh <- matrix(0, ncol = nrow(H),   nrow = n1*n2)
+Zp <- matrix(0, ncol = nrow(P),   nrow = n1*n2)
+
+for (i in 1:400) {
+  Zh[i,  unlist(Hs)[i]] <- 1
+  Zp[i,  unlist(Ps)[i]] <- 1
+}
+
+Zi <- .row.tensor.product(Zh, Zp)
+
+colnames(H) <- H.GM$ID
+colnames(P) <- P.GM$ID
+
+# HP<- .tensor.product(H,P)
+```
+
+#### Simulation
+
+```{r}
+gamma <- 0
+
+ah_ <-  0 # fixed
+ap_ <-  0 # fixed 
+ai_ <- 20 # fixed 
+
+nqtl.h = 10 # fixed
+nqtl.p = 10 # fixed
+nqtl.i = 10 # fixed
+
+Freq.h <- colMeans(H)
+Freq.p <- colMeans(P)
+# Freq.i <- colMeans(HP)
+    
+Poly.size.h <- 0 # fixed
+Poly.size.p <- 0 # fixed
+Poly.size.i <- 0 # fixed
+
+Poly.effet.h <- 0
+Poly.effet.p <- 0
+Poly.effet.i <- 0
+
+PWD <- paste0(getwd(),"/Simulation01/")
+label <- "[nqtl.h=%d][nqtl.p=%d][nqtl.i=%d][ah_=%d][ap_=%d][ai_=%d][Poly.size.h=%d][Poly.size.p=%d][Poly.size.i=%d][Poly.effet.h=%.3f][Poly.effet.p=%.3f][Poly.effet.i=%.3f][gamma=%.2f][h=%.2f][b=%.2f][tn=%d]"
+
+save.model <- function(nqtl.h, nqtl.p, nqtl.i, Zh, Zp, Zi, Sh, Sp, Si, ahS, apS, aiS, ah_s, ap_s, ai_s, E, fname) {
+  saveRDS(object = list("nqtl.h" = nqtl.h, "nqtl.p" = nqtl.p, "nqtl.i" = nqtl.i, "Sh" = Sh, "Sp" = Sp, "Si" = Si, "Zh" = Zh, "Zp" = Zp, "Zi" = Zi,  
+                        "ahS" = ahS, "apS" = apS, "aiS" = aiS, "ah_s" = ah_s, "ap_s" = ap_s, "ai_s" = ai_s, "E" = E), 
+                        file = fname)
+}
+
+save.trait <- function(Y, fname) {
+  write.table(list("Trait" = Y), file = fname, 
+              row.names =  FALSE, sep = " ", quote = FALSE)
+}
+
+sl.label <- function(h, b, tn) {
+  return(sprintf(label, nqtl.h, nqtl.p, nqtl.i, ah_, ap_, ai_, Poly.size.h, Poly.size.p, Poly.size.i, Poly.effet.h, Poly.effet.p, Poly.effet.i, gamma, h, b, tn))
+}
+
+model.fname <- function(h, b, tn) {
+  return(paste0(PWD, "model_", sl.label(h,b,tn), ".rds"))
+}
+
+trait.fname <- function(h, b, tn) {
+  return(paste0(PWD, "trait_", sl.label(h,b,tn), ".dat"))
+}
+
+sl <- function (h, b, tn) {
+# 
+#   if (file.exists(model.fname(h,b,tn))) {
+#     return(NULL)
+#   }
+
+  while(TRUE) {
+    
+    Informative.h <- which(Freq.h > 10/nrow(H)  & Freq.h < 1-10/nrow(H))
+    Informative.p <- which(Freq.p > 10/nrow(P)  & Freq.p < 1-10/nrow(P))
+    # Informative.i <- which(Freq.i > 10/nrow(HP) & Freq.p < 1-10/nrow(HP))
+    
+    Lh <- ncol(H)
+    Lp <- ncol(P)
+    
+    # Case nqtl.i == nqtl.h == nqtl.p
+    # the interactions are in pairs
+    Sh <- sample(Informative.h, nqtl.h)
+    Sp <- sample(Informative.p, nqtl.p)
+    Si <- unlist(lapply(1:nqtl.i, function(i) {
+      Sh[i] * Lp + Sp[i]
+    }))
+    
+    # Shp<- lapply(Sh, function(h) {lapply(Sp) {h*Lp + p}}) 
+    # Shp<- intersect(Informative.i, Shp)
+    # Si <- sample(Informative.i, nqtl.i)
+    
+    Hs <- H[, Sh]
+    Ps <- P[, Sp]
+    # Is <- HP[,Si]
+    Is <- .col.tensor.product(Hs, Ps)
+    
+    H_s <- H[, -Sh]
+    P_s <- P[, -Sp]
+    # I_s <- HP[,-Si]
+    
+    ah_s <- rep(0,ncol(H_s))
+    ap_s <- rep(0,ncol(P_s))
+    ai_s <- rep(0,ncol(P_s)) # rep(0,ncol(I_s))
+  
+    ah_s[sample(1:length(ah_s), Poly.size.h)] <- runif(min = -Poly.effet.h, max = Poly.effet.h, n = Poly.size.h)
+    ap_s[sample(1:length(ap_s), Poly.size.p)] <- runif(min = -Poly.effet.p, max = Poly.effet.p, n = Poly.size.p)
+    # ai_s[sample(1:length(ai_s), Poly.size.i)] <- runif(min = -Poly.effet.i, max = Poly.effet.i, n = Poly.size.i)
+    
+    ahS <- seq(ah_,ah_+nqtl.h,l=nqtl.h)
+    apS <- seq(ap_,ap_+nqtl.p,l=nqtl.p)
+    aiS <- seq(ai_,ai_+nqtl.i,l=nqtl.i)
+    
+    Uh <- Hs %*% ahS + H_s %*% ah_s
+    Up <- Ps %*% apS + P_s %*% ap_s
+    Ui <- Is %*% aiS # + I_s %*% ai_s
+    
+    Uh <- Zh %*% Uh + Zp %*% Up + Zi %*% Ui
+    Ua <- Zh %*% Hs %*% ahS + Zp %*% Ps %*% apS + Zi %*% Is %*% aiS
+    
+    vg <- var(Uh)
+    va <- var(Ua)
+    
+    a_ratio <- va/vg
+    
+    if (a_ratio < (b+0.02) && a_ratio > (b-0.02)) {
+      sigma_E <- as.numeric(sqrt(vg*(1-h)/h))
+      E <- sigma_E * rnorm(length(Uh))
+      Y <- Uh + E
+      save.model(nqtl.h = nqtl.h, nqtl.p = nqtl.p, nqtl.i = nqtl.i, Zh = Zh, Zp = Zp, Zi = Zi,  
+                 Sh = Sh, Sp = Sp, Si = Si, ahS = ahS, apS = apS, aiS = aiS, 
+                 ah_s = ah_s, ap_s = ap_s, ai_s = ai_s, E = E, fname = model.fname(h,b,tn))
+      
+      save.trait(Y, fname = trait.fname(h,b,tn))
+      
+      return(a_ratio)
+    }
+  }
+}
+```
+
+```{r}
+
+sl(h = 0.9, b = 1, tn = 1)
+
+```

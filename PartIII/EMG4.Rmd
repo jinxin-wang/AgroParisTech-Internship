@@ -1,0 +1,361 @@
+---
+title: "Verify the socres of the interactions"
+output: html_notebook
+---
+
+```{r}
+require('MM4LMM')
+require('tictoc')
+require("sommer")
+require("nnet")
+require("parallel")
+require("Rfast")
+require("dplyr")
+```
+
+
+```{r}
+Pheno <- read.csv("Simulation01/")[, 1]
+Y <- as.numeric(Pheno)
+
+H.GM <- read.table(file = "tomatoGM.dat", sep = " ", header = TRUE)
+H.GT <- read.csv(file = "tomatoGT.dat", sep = " ", header = FALSE)
+
+P.GM <- read.table("P.CapsiciGM.dat", sep = " ", header = TRUE)
+P.GT <- read.table("P.CapsiciGT.dat", sep = " ", header = FALSE)
+
+H <- t(H.GT) - 1
+P <- t(P.GT) - 1
+
+colnames(H) <- H.GM$ID
+colnames(P) <- P.GM$ID
+
+mdl <- readRDS("Simulation01/model_[nqtl.h=10][nqtl.p=10][nqtl.i=10][ah_=0][ap_=0][ai_=20][Poly.size.h=0][Poly.size.p=0][Poly.size.i=0][Poly.effet.h=0.000][Poly.effet.p=0.000][Poly.effet.i=0.000][gamma=0.00][h=0.90][b=1.00][tn=1].rds")
+
+Zh <- mdl$Zh
+Zp <- mdl$Zp
+Zi <- mdl$Zi
+
+```
+
+
+```{r}
+
+Geno1 <- H - 1
+Geno2 <- P - 1
+
+Z1 <- Zh
+Z2 <- Zp
+Zi <- Zi
+
+max_itr_num <- 10
+genome_names <- c("Host", "Pathogen")
+Method <- "ML"
+```
+
+
+```{r}
+
+.col.tensor.product<- function(A,B) {
+  if (ncol(A) == ncol(B)) return(matrix(mapply(function(x, i) x * B[,i], A, col(A)), ncol = ncol(A)))
+}
+
+.row.tensor.product<- function(A,B) {
+  if (nrow(A) == nrow(B)) return(t(.col.tensor.product(t(A), t(B))))
+}
+
+.tensor.product <- function(A,B) {
+  # https://en.wikipedia.org/wiki/Tensor_product
+  AoB <- A%o%B
+  return(do.call(rbind, mclapply(1:nrow(A), function(i) do.call(cbind,  lapply(1:ncol(A), function(j) (AoB)[i,j,,])), 
+                                 mc.cores = getOption("mc.cores", 48L))))
+}
+
+```
+
+
+```{r}
+
+selected_locus <- list("locus" = list(), "names" = list())
+
+X1 <- matrix(data = 1, nrow = length(Pheno), ncol = 1)
+colnames(X1) <- c("intercept")
+
+Init  <- NULL
+total_SNPs_num <- ncol(Geno1) + ncol(Geno2)
+
+bic_history <- c()
+extBIC_history <- c() 
+loglik <- 0
+loglik_history <- c()
+vg_history <- list("G1"=c(), "G2"=c(), "IA" = c(), "Error"=c())
+
+loci_name <- NULL
+loci_genome <- NULL # equal to 1 or 2
+
+.build.G <- function(Geno, Gname, Z = NULL, SNPs_names = NULL) {
+  
+  G <- list("Geno" = Geno, "Z" = Z, "K" = NULL, "K_" = NULL, "MMt" = NULL, "ZMMtZt" = NULL,
+          "ZM" = NULL, "selected_locus" = NULL, "selected_locus_names" = NULL, "name" = Gname, 
+          "SNPs_names" = SNPs_names, "ncol" = ncol(Geno))
+
+  if (is.null(Z)) G$Z <- diag(ncol = nrow(G$Geno))
+  
+  if (is.null(SNPs_names)) G$SNPs_names <- colnames(G$Geno)
+  
+  if (is.null(G$SNPs_names)) {
+    G$SNPs_names <- paste0(rep("SNP-", ncol(Geno)), 1:ncol(Geno))
+    colnames(G$Geno) <- G$SNPs_names
+  }
+
+  G$MMt <- Tcrossprod(Geno, Geno)
+  G$ZM  <- mat.mult(G$Z, Geno)
+  G$ZMMtZt <- mat.mult(G$Z, Tcrossprod(G$MMt,G$Z))
+  G$K <- G$MMt/mean(diag(G$MMt))
+  G$K_<- G$ZMMtZt/mean(diag(G$ZMMtZt))
+  
+  return(G)
+}
+
+.build.IA <- function(G1, G2, Zi = NULL) {
+
+  IA <- list("Z" = Zi, "K" = NULL, "selected_locus" = list(), "name" = "Interaction")
+
+  if(is.null(Zi)) {
+    IA$Z <- .row.tensor.product(G1$Z, G2$Z)
+  }
+  
+  IA$K <- .tensor.product(G1$K, G2$K)
+  IA$K_<-  mat.mult(IA$Z, Tcrossprod(IA$K,IA$Z))
+  
+  return(IA)
+}
+
+.update.G <- function(G, loci) {
+  if (loci <= 0) return(G)
+  # loci <- Geno$G[which(!selected_locus %in% Geno$selected_locus)]
+  MMt_ <- tcrossprod(G$G[, loci])
+  G$MMt <- G$MMt - MMt_
+  G$ZMMtZt  <- G$ZMMtZt - mat.mult(Geno$Z, Tcrossprod(MMt_,G$Z))
+  G$K   <- G$MMt/mean(diag(G$MMt))
+  # ZMMtZt = Z %*% K %*% t(Z)
+  G$K_  <- G$ZMMtZt/mean(diag(G$MMt))
+  G$selected_locus <- c(G$selected_locus, loci)
+  return(G)
+}
+
+.update.IA <- function(IA, G1, G2, loci_ia) {
+  IA$K <- .tensor.product(G1$K, G2$K)
+  IA$K_<-  mat.mult(IA$Z, Tcrossprod(IA$K,IA$Z))
+  IA$selected_locus[[length(IA$selected_locus)+1]] <- as.numeric(loci_ia)
+  return(IA)
+}
+
+.build.X <- function(X1, G1, G2, IA) {
+  ZG1 <- as.matrix(G1$ZM[,G1$selected_locus])
+  ZG2 <- as.matrix(G2$ZM[,G2$selected_locus])
+  ZGI <- Crossprod(IA$Z, .tensor.product(ZG1, ZG2))
+  X   <- cbind(X1, ZG1, ZG2, ZGI)
+  return(X)
+}
+
+.calc.snps.scores <- function(a_hat, diag_var_a_hat, L, snps_names, selected_locus, genome_name) {
+  # calculate snps scores
+  indx <- which(diag_var_a_hat != 0)
+  tsq <- a_hat[indx]^2/diag_var_a_hat[indx]
+  names(tsq) <- seq(1, length(a_hat))[indx]
+  best_score <- max(tsq, na.rm = TRUE)
+  indx <- which(tsq == best_score)
+
+  # deal with the case of more than one snps reach the best score
+  midpoint <- 1
+  if (length(indx) > 2) midpoint <- trunc(length(indx)/2) + 1
+  indx <- indx[midpoint]
+  orig_indx <- seq(1, L)
+  loci_idx <- orig_indx[as.numeric(names(tsq))[indx]]
+
+  # snps name and global index
+  if (!is.null(selected_locus)) {
+    score_names <- snps_names[-selected_locus]
+  } else {
+    score_names <- snps_names
+  }
+
+  loci_name <- score_names[loci_idx]
+  loci_idx <- which(snps_names==loci_name)
+
+  return(list("loci_name" = loci_name, "loci_idx" = loci_idx, "score" = best_score))
+}
+
+
+.find.putative.qtl <- function(G1, G2, IA, Y, P_gamma, Sigma_gamma) {
+  
+  PgY <- crossprod(P_gamma, Y)
+  PSP <- Tcrossprod(P_gamma, Sigma_gamma) %>% Tcrossprod(., P_gamma)
+  
+  #### G1
+  tic("G1:")
+  if(is.null(G1$selected_locus)) {
+    M1_s <- G1$G
+  } else {
+    M1_s <- G1$G[, -G1$selected_locus]
+  }
+  
+  a1 <- Crossprod(G1$Z,PgY) %>% Crossprod(M1_s, .)
+  P1 <- Crossprod(G1$Z, PSP) %>%  mat.mult(.,G1$Z)
+  diag_var_a1 <- rowSums(Crossprod(M1_s, P1) * t(M1_s))
+  score1 <- .calc.snps.scores(a1, diag_var_a1, ncol(G1$G), G1$SNPs_names, G1$selected_locus, G1$name)
+  toc()
+  
+  #### G2 
+  tic("G2:")
+  if(is.null(G2$selected_locus)) {
+    M2_s <- G2$G
+  } else {
+    M2_s <- G2$G[, -G2$selected_locus]
+  }
+  
+  a2 <- Crossprod(G2$Z,PgY) %>% Crossprod(M2_s, .)
+  P2 <- Crossprod(G2$Z, PSP) %>% mat.mult(.,G2$Z)  
+  diag_var_a2 <- rowSums(Crossprod(M2_s, P2) * t(M2_s))
+  score2 <- .calc.snps.scores(a2, diag_var_a2, ncol(G2$G), G2$SNPs_names, G2$selected_locus, G2$name)
+  toc()
+  
+  #### Gi
+  # mclapply super slow 
+  # 2000 snps by lapply: 365.56 sec elapsed
+  
+  tic("Gi:")
+  if (is.null(G1$selected_locus)) {
+    ZM1 <- G1$ZM
+  } else {
+    ZM1 <- G1$ZM[, - G1$selected_locus]
+  }
+
+  if (is.null(G2$selected_locus)) {
+    ZM2 <- G2$ZM
+  } else {
+    ZM2 <- G2$ZM[, - G2$selected_locus]
+  }
+
+  scores_ia <- lapply(c(1:ncol(ZM1)), function(i) {
+    ZM1ixZM2 <- ZM1[,i] * ZM2
+    ai <- Crossprod(ZM1ixZM2, PgY)
+    diag_var_ai <- colSums(t(Crossprod(ZM1ixZM2,PSP))*ZM1ixZM2)
+    scorei <- .calc.snps.scores(ai, diag_var_ai, G2$ncol, G2$SNPs_names, G2$selected_locus, IA$name)
+    return(scorei)
+  })
+  toc()
+  
+  return(list("G1" = score1, "G2" = score2, "IA" = scores_ia))
+}
+
+```
+
+
+```{r}
+
+# tryCatch({
+
+  for (itr_num in 1:max_itr_num) {
+    
+    message(sprintf("\nIteration: %d", itr_num))
+    
+    #### #### #### ####    STEP 1 model building    #### #### #### ####
+    tic("Build G1, G2 and IA")
+    if (length(selected_locus$locus) == 0) {
+      G1 <- .build.G(Geno = Geno1, Z = Z1, Gname = genome_names[1])
+      G2 <- .build.G(Geno = Geno2, Z = Z2, Gname = genome_names[2])
+      IA <- .build.IA(G1 = G1, G2 = G2, Zi = Zi)
+      X  <- X1
+    } else {
+      locus_ia <- as.numeric(selected_locus$locus[[itr_num-1]])
+      G1 <- .update.G(G = G1, loci = locus_ia[1])
+      G2 <- .update.G(G = G2, loci = locus_ia[2])
+      IA <- .update.IA(IA, G1, G2, locus_ia)
+      X  <- .build.X(X1 = X1, G1 = G1, G2 = G2, IA = IA)
+    }
+    tic()
+    
+    VL <- list(G1 = G1$K, G2 = G2$K, IA = IA$K, Error = diag(1,length(Y)))
+    ZL <- list(G1 = G1$Z, G2 = G2$Z, IA = IA$Z, Error = diag(1,length(Y)))
+    
+    if (!is.null(genome_names)) {
+      names(VL) <- c(genome_names, "Interaction", "Error")
+      names(ZL) <- c(genome_names, "Interaction", "Error")
+    }
+    
+    if (is.null(Init)) {
+      Init <- rep(var(Pheno)/4,4)
+    }
+    
+    tic("MMest: ")
+    res <- MMEst(Y = Pheno, Cofactor = X, Method = "ML",
+                 VarList = VL, ZList = ZL, Init = Init,
+                 MaxIter = 400, CritLogLik = 0.0001)
+    toc()
+    
+    # Note: vg, ve, loglik are very slightly different from Eagle's
+    vg1 <- res$NullModel$Sigma2[genome_names[1]]
+    vg2 <- res$NullModel$Sigma2[genome_names[2]]
+    vgi <- res$NullModel$Sigma2["Interaction"]
+    ve <- res$NullModel$Sigma2["Error"]
+    
+    Init <- c(vg1, vg2, vgi, ve)
+    
+    # To calculate log likelihood, MM4LMM use gradient descent, meanwhile Eagle use grid.   
+    loglik <- res$NullModel$`LogLik (ML)`   
+
+    message(sprintf("log likelihood: %f, var G1: %f, var G2: %f, var vgi: %f, var E: %f", loglik, vg1, vg2, vgi, ve))
+    
+    #### #### #### ####    STEP 2 model evaluation   #### #### #### #### 
+    # Degree of freedom of Eagle's extend BIC equals to 1
+    bic <- -2 * loglik + (ncol(X)+1) * log(length(Pheno))
+    ext_bic <- bic + 2 * gamma * lchoose(total_SNPs_num, length(selected_locus$order))
+    
+    message(sprintf("BIC: %f, extend BIC: %f", bic, ext_bic))
+    
+    bic_history <- c(bic_history, bic)
+    extBIC_history <- c(extBIC_history, ext_bic)
+    vg_history$G1 <- c(vg_history$G1, vg1)
+    vg_history$G2 <- c(vg_history$G1, vg2)
+    vg_history$IA <- c(vg_history$IA, vgi)
+    vg_history$Error <- c(vg_history$Error, ve)
+    loglik_history <- c(loglik_history, loglik)
+
+    #### #### #### ####    STEP 3 model selection   #### #### #### ####  
+    tic("Calculate Sigma_gamma and P_gamma: ")
+    Sigma_gamma <- diag(ve, nrow = nrow(G1$K_)) + vg1 * G1$K_ + vg2 * G2$K_ + vgi * IA$K_
+    Sigma_gamma_1 <- chol2inv(cholesky(Sigma_gamma, parallel = TRUE))
+    XtS_1 <- Crossprod(X, Sigma_gamma_1)
+    P_gamma <-  Sigma_gamma_1 - chol2inv(cholesky(Crossprod(X, t(XtS_1)), parallel = TRUE)) %>% Crossprod(., XtS_1) %>% Crossprod(XtS_1, .)
+    toc()
+    
+    scores <- .find.putative.qtl(G1, G2, IA, Y, P_gamma, Sigma_gamma)
+
+    
+    ia_scores_df <- as.data.frame(do.call(rbind, scores$IA1))
+    ia_best_score <- as.numeric(ia_scores_df$score[which.max(ia_scores_df$score)])
+    
+    if ( scores$G1$score > scores$G2$score && scores$G1$score > ia_best_score) {
+      selected_locus$locus[[itr_num]] <- c(scores$G1$loci_idx, 0)
+      selected_locus$names[[itr_num]] <- c(scores$G1$loci_name,"")
+      message(sprintf("[%s] new selected loci: %s, index: %d", genome_names[1], scores$G1$loci_name, scores$G1$loci_idx))
+    } else if ( scores$G2$score > scores$G1$score && scores$G2$score > ia_best_score ) {
+      selected_locus$locus[[itr_num]] <- c(0, scores$G2$loci_idx)
+      selected_locus$names[[itr_num]] <- c("",scores$G2$loci_name)
+      message(sprintf("[%s] new selected loci: %s, index: %d", genome_names[2], scores$G2$loci_name, scores$G2$loci_idx))
+    } else {
+      G1_best_idx <- which.max(ia_scores_df$score)
+      G2_best_idx <- as.numeric(ia_scores_df$loci_idx[G1_best_idx])
+      selected_locus$locus[[itr_num]] <- c(G1_best_idx, G2_best_idx)
+      selected_locus$names[[itr_num]] <- c(G1$SNPs_names[G1_best_idx], G2$SNPs_names[G2_best_idx])
+      message(sprintf("new interaction locus: %s and %s, index: %d and %d", 
+                      G1$SNPs_names[G1_best_idx], G2$SNPs_names[G2_best_idx], G1_best_idx, G2_best_idx))
+    }
+    
+    break
+  }
+
+```
+

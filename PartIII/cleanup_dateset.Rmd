@@ -1,0 +1,184 @@
+---
+title: "Phytophthora capsici and tomato SNP.RS"
+output: html_notebook
+---
+
+```{r}
+require("nnet")
+require("parallel")
+require("dplyr")
+require("vcfR")
+```
+
+#### Load Phytophthora capsici SNPs data
+
+```{r}
+P.capsici <- read.vcfR("NY_Pcapsici_CloneCorrected.vcf")
+
+P.capsici@meta
+head(P.capsici@fix)
+head(P.capsici@gt[, 1:5])
+dim(P.capsici@gt)
+```
+
+#### Generate Genetic Map file for Phytophthora capsici
+
+```{r}
+# Genetic Map
+P.capsici.GM.df <- data.frame(CHROM = strtoi(P.capsici@fix[,1]), POS = strtoi(P.capsici@fix[,2]), ID = P.capsici@fix[,3])
+
+# write.table(P.capsici.GM.df, "P.CapsiciGM.dat", row.names =  FALSE, sep = " ", quote = FALSE)
+
+head(P.capsici.GM.df)
+```
+
+#### Convert Genotype to SNPs 
+
+```{r}
+# exact Genotype
+P.capsici.GT <- mclapply(1:ncol(P.capsici@gt), 
+                          function(j) unlist(lapply(P.capsici@gt[,j], 
+                                                      function(x) {
+                                                          gt <- strsplit(x, ":")[1]
+                                                          if (grepl("0/0", gt)) return(0) # AA
+                                                          if (grepl("1/1", gt)) return(2) # BB
+                                                          if (grepl("0/1", gt)) return(1) # AB
+                                                          if (grepl("1/0", gt)) return(1) # BA 
+                                                          return(NaN) # Missing Value
+                                                      })), mc.cores = getOption("mc.cores", 48L))
+
+P.capsici.GT.df <- as.data.frame(do.call(cbind, P.capsici.GT))
+colnames(P.capsici.GT.df) <- colnames(P.capsici@gt)
+```
+
+#### the markers without missing value for each chromosome
+
+```{r}
+marks <- unlist(mclapply(1:nrow(P.capsici.GT.df[2:130]), 
+                         function(i) { sum(is.na(P.capsici.GT.df[i, 2:130])) == 0 }, 
+                         mc.cores = getOption("mc.cores", 48L)))
+
+fix.wo.mv <- P.capsici@fix[which(marks), ]
+fix.wo.mv_byChr <- as.data.frame(fix.wo.mv) %>% group_by(CHROM)
+len.wo.mv_byChr <- unlist(lapply(group_rows(fix.wo.mv_byChr), function(x) length(x)))
+
+# The number of SNPs without missing values by chromosome
+max(len.wo.mv_byChr)
+
+# High ratio of missing values
+sum(is.na(P.capsici.GT.df[,2:ncol(P.capsici.GT.df)])) / (nrow(P.capsici.GT.df) * (ncol(P.capsici.GT.df)-1))
+```
+
+#### Deal with the missing values, replace the missing values by ref
+
+```{r}
+
+P.capsici.GT.filled <- mclapply(2:ncol(P.capsici@gt), 
+                          function(j) unlist(lapply(P.capsici@gt[,j], 
+                                                      function(x) {
+                                                          gt <- strsplit(x, ":")[1]
+                                                          if (grepl("0/0", gt)) return(0) # AA
+                                                          if (grepl("1/1", gt)) return(2) # BB
+                                                          if (grepl("0/1", gt)) return(1) # AB
+                                                          if (grepl("1/0", gt)) return(1) # BA 
+                                                          return(0) # Missing Value
+                                                      })), mc.cores = getOption("mc.cores", 48L))
+
+P.capsici.GT.filled.df <- as.data.frame(do.call(cbind, P.capsici.GT.filled))
+colnames(P.capsici.GT.filled.df) <- colnames(P.capsici@gt)[2:ncol(P.capsici@gt)]
+
+# write.table(P.capsici.GT.filled.df, "P.CapsiciGT.dat", row.names =  FALSE, sep = " ", quote = FALSE)
+
+head(P.capsici.GT.filled.df[, 1:8])
+```
+
+#### find the chromosome with the lowest ratio of missing values
+
+```{r}
+# unique(unlist(P.capsici@fix[,1]))
+
+data.frame(P.capsici.GM.df, complete = marks) %>%
+  group_by(CHROM) %>%
+    summarise(CHROM_LEN = length(ID), COMPLETE = sum(complete), RATIO = sum(complete) / length(ID)) %>%
+      filter(CHROM_LEN > 800, RATIO > 0.02) -> P.capsici.subset 
+        
+P.capsici.subset %>% summarise(SUM = sum(CHROM_LEN))
+
+```
+
+#### extract Genetic Markers and Genotype by CHROM
+
+```{r}
+P.capsici.GM.df %>% filter(CHROM %in% P.capsici.subset$CHROM) -> P.capsici.GM.subset
+
+data.frame(CHROM = P.capsici.GM.df$CHROM, P.capsici.GT.filled.df) %>% 
+  filter(CHROM %in% P.capsici.subset$CHROM) -> P.capsici.GT.subset
+
+P.capsici.GT.subset <- P.capsici.GT.subset[, 2:ncol(P.capsici.GT.subset)]
+
+write.table(P.capsici.GM.subset, "P.CapsiciGM.dat", row.names =  FALSE, sep = " ", quote = FALSE)
+write.table(P.capsici.GT.subset, "P.CapsiciGT.dat", row.names =  FALSE, col.names = FALSE, sep = " ", quote = FALSE)
+```
+
+#### SNP_RS
+
+```{r}
+tomato <- read.vcfR("SNP_RS.vcf")
+
+# This is no missing values
+sum(is.na(tomato@gt))
+```
+
+#### tomato Genetic Map
+
+```{r}
+# all IDs are na
+nrow(tomato@fix) == length(is.na(tomato@fix[,3]))
+
+tomato.GM.df <- data.frame(CHROM = tomato@fix[,1], POS = strtoi(tomato@fix[,2]), ID = paste(tomato@fix[,1], tomato@fix[,2], sep = "."))
+# write.table(tomato.GM.df, "tomatoGM.dat", row.names =  FALSE, sep = " ", quote = FALSE)
+
+head(tomato.GM.df)
+```
+
+
+#### tomato Genotype
+
+```{r}
+tomato.GT    <- mclapply(2:ncol(tomato@gt), function(i) strtoi(tomato@gt[, i]), mc.cores = getOption("mc.cores", 48L))
+tomato.GT.df <- as.data.frame(do.call(cbind, tomato.GT))
+colnames(tomato.GT.df) <- colnames(tomato@gt)[2:ncol(tomato@gt)]
+
+# write.table(tomato.GT.df, "tomatoGT.dat", row.names =  FALSE, sep = " ", quote = FALSE)
+
+head(tomato.GT.df[, 1:8])
+```
+
+#### extract Genetic Markers and Genotype by CHROM
+
+```{r}
+tomato.GM.df %>% group_by(CHROM) %>% summarise(length(ID))
+
+# chromosome AL646053.1
+tomato.GM.df %>% filter(CHROM == "AL646053.1") -> tomato.GM.chr1
+
+# subset index of chromosome AL646053.1, pick up one SNP among four 
+subset.idx <- seq(5,nrow(tomato.GM.chr1),4)
+
+# Genetic Map
+tomato.GM.chr1.subset <- tomato.GM.chr1[subset.idx,]
+
+data.frame(CHROM = tomato.GM.df$CHROM, tomato.GT.df) %>% 
+  filter(CHROM == "AL646053.1") -> tomato.GT.chr1
+
+# Genotype
+tomato.GT.chr1.subset <- tomato.GT.chr1[subset.idx, 2:ncol(tomato.GT.chr1)]
+
+write.table(tomato.GM.chr1.subset, "tomatoGM.dat", row.names =  FALSE, sep = " ", quote = FALSE)
+write.table(tomato.GT.chr1.subset, "tomatoGT.dat", row.names =  FALSE, col.names = FALSE, sep = " ", quote = FALSE)
+
+dim(tomato.GM.chr1.subset)
+dim(tomato.GT.chr1.subset)
+```
+
+
