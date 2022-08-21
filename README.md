@@ -18,6 +18,7 @@ $ conda activate base
 (base)$ conda activate pytorch_env
 (pytorch_env)$ conda install jupyterlab cudatoolkit pytorch scikit-learn
 (pytorch_env)$ jupyter-lab --generate-config
+(pytorch_env)$ jupyter notebook password
 ```
 ###### JupyterLab Configuration (Server: ~/.jupyter/jupyter_lab_config.py)
 ```
@@ -26,7 +27,7 @@ $ conda activate base
 c.ServerApp.ip = '0.0.0.0'
 c.ServerApp.notebook_dir = u'/home/myaccount/work/JupyterHome'
 c.ServerApp.open_browser = False
-c.ServerApp.password = u'password'
+c.ServerApp.password = u'paste the generated password here'
 c.ServerApp.password_required = True
 c.ServerApp.port = 8889
 
