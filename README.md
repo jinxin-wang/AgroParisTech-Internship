@@ -9,7 +9,7 @@ Internship in AgroParisTech 2022
 
 #### Part III - Two-Way Mixed Effects Model
 
-#### Part IIII - State-of-the-Art in Deep Learning
+#### Part IV - State-of-the-Art in Deep Learning
 
 ###### Managing environment with conda (Bash)
 ```
