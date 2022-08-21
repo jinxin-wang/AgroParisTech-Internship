@@ -47,4 +47,4 @@ Connection Type : SSH
 Source Port : 5555
 Destination : server_ip_address:8889
 ```
-###### Open URL: http://localhost:5555/lab in the browser
+###### Open JupyterLab (URL: http://localhost:5555/lab) in the browser
