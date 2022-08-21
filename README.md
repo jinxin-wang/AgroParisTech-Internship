@@ -35,4 +35,15 @@ or
 (pytorch_env)$ jupyter-lab --config .jupyter/jupyter_lab_config.py
 ```
 
-###### SSH Port Forwarding (Client)
+###### SSH Port Forwarding (Windows Client: Putty)
+```
+# Session :
+Host Name : username@server_ip_address
+Port : 22
+Connection Type : SSH
+
+# Connection -> SSH -> Tunnels:
+Source Port : 5555
+Destination : server_ip_address:8889
+```
+Open URL: http://localhost:5555/lab in the browser
