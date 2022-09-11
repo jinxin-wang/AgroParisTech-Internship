@@ -50,6 +50,8 @@ Destination : server_ip_address:8889
 ###### Open JupyterLab (URL: http://localhost:5555/lab) in the browser
 
 #### Public Data : 
+
 [Paper](https://apsjournals.apsnet.org/doi/full/10.1094/PHYTO-04-20-0112-FI)
+
 [Phytophthora capsici](https://datacommons.cyverse.org/browse/iplant/home/shared/GoreLab/dataFromPubs/Vogel_PcapGWAS_2020/NY_Pcapsici_CloneCorrected.vcf)
 
